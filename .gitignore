@@ -1,0 +1,6 @@
+*.dtbo
+module*
+*.o
+*.ko
+Module*
+*.mod.c
