@@ -9,30 +9,34 @@ Kernel versions tested:
 
 4.9
 
-Directions:
+Raspberry Pi Module Build/Install Directions:
 
-1. Build Modules and overlay
+1. Install Kernel Headers
+
+$ sudo apt-get install raspberrypi-kernel-headers
+
+2. Build Modules and overlay
 
 $ ./build.sh
 
-2. Install Modules and overlay
+3. Install Modules and overlay
 
 $ sudo ./install.sh
 
-3. Open /boot/config.txt
+4. Open /boot/config.txt
 
 $ sudo vi /boot/config.txt
 
-4. At the bottom of the file you will see the following:
+5. At the bottom of the file you will see the following:
 
 dtparam=audio=on
 
-5. Comment it out using # so it appears as the following:
+6. Comment it out using # so it appears as the following:
 
 #dtparam=audio=on
 
-6. Enable the tempo sound card by adding the following:
+7. Enable the tempo sound card by adding the following:
 
 dtoverlay=rpi-tscs42xx-overlay
 
-7. Save and exit vi and reboot
+8. Save and exit vi and reboot
