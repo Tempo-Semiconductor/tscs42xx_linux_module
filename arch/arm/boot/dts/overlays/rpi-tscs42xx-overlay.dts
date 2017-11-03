@@ -1,0 +1,80 @@
+// Definitions for Tempo Semiconductor tscs42xx 
+/dts-v1/;
+/plugin/;
+
+//#include <include/dt-bindings/gpio/gpio.h> 
+//#include <include/dt-bindings/clock/bcm2835.h>
+//#include <include/dt-bindings/pinctrl/bcm2835.h>
+
+/ {
+	compatible = "brcm,bcm2708";
+
+	fragment@0 {
+		target = <&cprman>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+			gpclk1_pins: gpclk1_pins {
+				brcm,pins = <5>;
+				brcm,function = <4>; //<BCM2835_FSEL_ALT0>;
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&i2c1>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			codec: tscs42xx@69 {
+				compatible = "tscs,tscs42xx";
+				reg = <0x69>;
+				status = "okay";
+				mclk-src = "mclk";	
+				mclk-src-freq = <25000000>;
+				clocks = <&cprman 39>; //<BCM2835_CLOCK_GP1>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&gpclk1_pins>;
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&i2s>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "rpi-tscs,rpi-tscs42xx";
+			i2s-controller = <&i2s>;
+			audio-codec = <&codec>;
+				audio-routing =
+					"Headphone Jack", "Headphone L",
+					"Headphone Jack", "Headphone R",
+					"Speaker", "Speaker L",
+					"Speaker", "Speaker R",
+					"Line In 3 L", "Digital Mic",
+					"Line In 3 R", "Digital Mic",
+					"Digital Mic", "Digital Mic Enable",
+					"Line In 1 L", "Analog Mic",
+					"Line In 1 R", "Analog Mic",
+					"Analog Mic", "Mic Bias",
+					"Line In 2 L", "Line In",
+					"Line In 2 R", "Line In";
+			status = "okay";
+			hp-gpios = <&gpio 16 1>; //<GPIO_ACTIVE_LOW>;
+		//	mic-gpios = <&gpio 17 0>; //<GPIO_ACTIVE_HIGH>;
+		};
+	};
+};
