@@ -2,8 +2,6 @@
 
 root="$PWD"
 kernel_src_dir="/usr/src/linux-headers-$(uname -r)"
-#codec_mods_dir="kernel/sound/soc/codecs"
-#sound_card_mods_dir="kernel/sound/soc/bcm"
 
 echo "Kernel source directory is: $kernel_src_dir/"
 
@@ -16,7 +14,6 @@ cd "$root/sound/soc/bcm/"
 make -C $kernel_src_dir M=$PWD modules_install
 
 depmod -a
-echo dtoverlay=rpi-tscs42xx-overlay >> /boot/config.txt
 
 echo "Installing overlays"
 cd "$root/arch/arm/boot/dts/overlays/"
