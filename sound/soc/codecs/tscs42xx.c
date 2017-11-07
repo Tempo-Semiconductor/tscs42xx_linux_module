@@ -1613,6 +1613,7 @@ struct tempo_biquad {
 	}
 
 static struct tempo_biquad dsp_biquads[] = {
+	/* EQ1 */
 	TEMPO_BIQUAD(eq1_ch0_band1, 0x00),
 	TEMPO_BIQUAD(eq1_ch0_band2, 0x05),
 	TEMPO_BIQUAD(eq1_ch0_band3, 0x0a),
@@ -1625,12 +1626,56 @@ static struct tempo_biquad dsp_biquads[] = {
 	TEMPO_BIQUAD(eq1_ch1_band4, 0x2f),
 	TEMPO_BIQUAD(eq1_ch1_band5, 0x34),
 	TEMPO_BIQUAD(eq1_ch1_band6, 0x39),
+	/* EQ2 */
+	TEMPO_BIQUAD(eq2_ch0_band1, 0x40),
+	TEMPO_BIQUAD(eq2_ch0_band2, 0x45),
+	TEMPO_BIQUAD(eq2_ch0_band3, 0x4a),
+	TEMPO_BIQUAD(eq2_ch0_band4, 0x4f),
+	TEMPO_BIQUAD(eq2_ch0_band5, 0x54),
+	TEMPO_BIQUAD(eq2_ch0_band6, 0x59),
+	TEMPO_BIQUAD(eq2_ch1_band1, 0x60),
+	TEMPO_BIQUAD(eq2_ch1_band2, 0x65),
+	TEMPO_BIQUAD(eq2_ch1_band3, 0x6a),
+	TEMPO_BIQUAD(eq2_ch1_band4, 0x6f),
+	TEMPO_BIQUAD(eq2_ch1_band5, 0x74),
+	TEMPO_BIQUAD(eq2_ch1_band6, 0x79),
+	/* Bass */
+	TEMPO_BIQUAD(bass_ext1, 0x80),
+	TEMPO_BIQUAD(bass_ext2, 0x85),
+	TEMPO_BIQUAD(bass_lmt, 0x8c),
+	TEMPO_BIQUAD(bass_cto, 0x91),
+	/* Treble */
+	TEMPO_BIQUAD(treb_ext1, 0x97),
+	TEMPO_BIQUAD(treb_ext2, 0x9c),
+	TEMPO_BIQUAD(treb_lmt, 0xa3),
+	TEMPO_BIQUAD(treb_cto, 0xa8),
+	/* Multi Band Compressor */
+	TEMPO_BIQUAD(mbc_1_bq1, 0xb0),
+	TEMPO_BIQUAD(mbc_1_bq2, 0xb5),
+	TEMPO_BIQUAD(mbc_2_bq1, 0xba),
+	TEMPO_BIQUAD(mbc_2_bq2, 0xbf),
+	TEMPO_BIQUAD(mbc_3_bq1, 0xc4),
+	TEMPO_BIQUAD(mbc_3_bq2, 0xc9),
 };
 
 static struct tempo_coefficient gen_coefficients[] = {
+	/* 3D */
 	TEMPO_COEFFICIENT(3d_coef, 0xae),
+	TEMPO_COEFFICIENT(3d_mix, 0xaf),
+	/* EQ1 */
 	TEMPO_COEFFICIENT(eq1_ch0_prescale, 0x1f),
 	TEMPO_COEFFICIENT(eq1_ch1_prescale, 0x3f),
+	/* EQ2 */
+	TEMPO_COEFFICIENT(eq2_ch0_prescale, 0x5f),
+	TEMPO_COEFFICIENT(eq2_ch1_prescale, 0x7f),
+	/* Bass */
+	TEMPO_COEFFICIENT(bass_nlf_m1, 0x8a),
+	TEMPO_COEFFICIENT(bass_nlf_m2, 0x8b),
+	TEMPO_COEFFICIENT(bass_mix, 0x96),
+	/* Treble */
+	TEMPO_COEFFICIENT(treb_nlf_m1, 0xa1),
+	TEMPO_COEFFICIENT(treb_nlf_m2, 0xa2),
+	TEMPO_COEFFICIENT(treb_mix, 0xad),
 };
 
 static struct tempo_control controls[] = {
