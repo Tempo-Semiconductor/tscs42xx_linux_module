@@ -32,6 +32,8 @@ while getopts $options opt; do
             build_card=true
         elif [ "$OPTARG" = 'overlay' ]; then
             build_overlay=true
+        else
+            echo -e "\n *** Error: Unrecognized build target $OPTARG\n" >&2; usage; exit 1;
         fi
         ;;
     h )
