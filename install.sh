@@ -7,15 +7,17 @@ install_codec=false
 install_card=false
 install_overlay=false
 run_depmod=false
+make_args=''
 
-options=':d:i:h'
+options=':d:i:a:h'
 
-usage_str="$(basename "$0") [-h] [-d dir] [-i target] -- Builds the TSCS42xx kernel module
+usage_str="$(basename "$0") [-h] [-d dir] [-i target] [-a args] -- Builds the TSCS42xx kernel module
 
 where:
     -h  show this help text
     -d  set the source directory
-    -i  set the install targets codec, card, and/or overlay"
+    -i  set the install targets codec, card, and/or overlay
+    -a  arguments to pass to make"
 
 usage() { echo "$usage_str"; }
 
@@ -37,6 +39,9 @@ while getopts $options opt; do
             echo -e "\n *** Error: Unrecognized install target $OPTARG\n" >&2; usage; exit 1;
         fi
         ;;
+    a )
+        make_args="${OPTARG}"
+        ;;
     h )
         usage; exit 0;
         ;;
@@ -54,14 +59,14 @@ echo "Kernel source directory: $kernel_src_dir/"
 if [ "$install_all" = true ] || [ "$install_codec" = true ]; then
     echo "Installing modules in $root/sound/soc/codecs/"
     cd "$root/sound/soc/codecs/"
-    make -C $kernel_src_dir M=$PWD modules_install
+    make $make_args -C $kernel_src_dir M=$PWD modules_install
     run_depmod=true
 fi
 
 if [ "$install_all" = true ] || [ "$install_card" = true ]; then
     echo "Installing modules in $root/sound/soc/bcm/"
     cd "$root/sound/soc/bcm/"
-    make -C $kernel_src_dir M=$PWD modules_install
+    make $make_args -C $kernel_src_dir M=$PWD modules_install
     run_depmod=true
 fi
 
