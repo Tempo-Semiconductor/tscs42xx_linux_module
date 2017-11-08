@@ -632,8 +632,7 @@ static const struct pll_ctl *get_pll_ctl(int input_freq)
 	return pll_ctl;
 }
 
-static int sample_rate_to_pll_freq_out(struct snd_soc_codec *codec,
-		int sample_rate)
+static inline int sample_rate_to_pll_freq_out(int sample_rate)
 {
 	switch (sample_rate) {
 	case 11025:
@@ -782,7 +781,7 @@ static int power_up_audio_plls(struct snd_soc_codec *codec,
 	unsigned int mask;
 	unsigned int val;
 
-	freq_out = sample_rate_to_pll_freq_out(codec, tscs_data->samplerate);
+	freq_out = sample_rate_to_pll_freq_out(tscs_data->samplerate);
 	switch (freq_out) {
 	case 122880000: // 48k
 		mask = RM_PLLCTL1C_PDB_PLL1;
@@ -1692,8 +1691,7 @@ static struct tempo_control controls[] = {
 	TEMPO_CONTROL(be_en, R_FXCTL, RM_FXCTL_BEEN, FB_FXCTL_BEEN),
 };
 
-static int create_sysfs_interface(struct kobject *parent_kobj,
-		struct tscs42xx_priv *tscs_data)
+static int create_sysfs_interface(struct kobject *parent_kobj)
 {
 	struct kobject *dsp_kobj;
 	struct kobject *controls_kobj;
@@ -1767,7 +1765,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 
 	mutex_lock(&tscs_data->lock);
 
-	ret = create_sysfs_interface(&codec->dev->kobj, tscs_data);
+	ret = create_sysfs_interface(&codec->dev->kobj);
 	if (ret < 0)
 		dev_info(codec->dev, "Failed to create dsp interface (%d)\n",
 			ret);
