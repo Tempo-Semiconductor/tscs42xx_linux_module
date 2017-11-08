@@ -51,19 +51,19 @@ done
 echo "Kernel source directory: $kernel_src_dir/"
 
 if [ "$build_all" = true ] || [ "$build_codec" = true ]; then
-echo "Building modules in $root/sound/soc/codecs/"
-cd "$root/sound/soc/codecs/"
-make -C $kernel_src_dir M=$PWD modules
+    echo "Building modules in $root/sound/soc/codecs/"
+    cd "$root/sound/soc/codecs/"
+    make -C $kernel_src_dir M=$PWD modules
 fi
 
 if [ "$build_all" = true ] || [ "$build_card" = true ]; then
-echo "Building modules in $root/sound/soc/bcm/"
-cd "$root/sound/soc/bcm/"
-make -C $kernel_src_dir M=$PWD modules
+    echo "Building modules in $root/sound/soc/bcm/"
+    cd "$root/sound/soc/bcm/"
+    make -C $kernel_src_dir M=$PWD modules
 fi
 
 if [ "$build_all" = true ] || [ "$build_overlay" = true ]; then
-echo "Building overlay"
-cd "$root/arch/arm/boot/dts/overlays/"
-dtc -@ -I dts -O dtb -o rpi-tscs42xx-overlay.dtbo rpi-tscs42xx-overlay.dts
+    echo "Building overlay"
+    cd "$root/arch/arm/boot/dts/overlays/"
+    dtc -@ -I dts -O dtb -o rpi-tscs42xx-overlay.dtbo rpi-tscs42xx-overlay.dts
 fi
