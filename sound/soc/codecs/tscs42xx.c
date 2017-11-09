@@ -38,9 +38,9 @@ enum {
 	PLL_SRC_CLK_MCLK2,
 };
 
-/* 
- * Functions that receive a pointer to data 
- * should assume that the data is locked. 
+/*
+ * Functions that receive a pointer to data
+ * should assume that the data is locked.
  */
 struct tscs42xx_priv {
 	struct regmap *regmap;
@@ -738,10 +738,6 @@ static int configure_clocks(struct snd_soc_codec *codec,
 	return 0;
 }
 
-/*
- * A PLL will not truly be powered down until the DAC or
- * ADC that is using it is also powered down.
- */
 static int power_down_audio_plls(struct snd_soc_codec *codec,
 	struct tscs42xx_priv *tscs42xx)
 {
@@ -749,8 +745,6 @@ static int power_down_audio_plls(struct snd_soc_codec *codec,
 
 	tscs42xx->pll_users--;
 	if (tscs42xx->pll_users > 0) {
-		// On a failure we'll error on the
-		// side of leaving PLLs powered
 		return 0;
 	}
 
@@ -772,10 +766,6 @@ static int power_down_audio_plls(struct snd_soc_codec *codec,
 	return 0;
 }
 
-/*
- * A PLL will not truly be powered up until the DAC or
- * ADC that is using it is also powered up.
- */
 static int power_up_audio_plls(struct snd_soc_codec *codec,
 	struct tscs42xx_priv *tscs42xx)
 {
@@ -786,11 +776,11 @@ static int power_up_audio_plls(struct snd_soc_codec *codec,
 
 	freq_out = sample_rate_to_pll_freq_out(tscs42xx->samplerate);
 	switch (freq_out) {
-	case 122880000: // 48k
+	case 122880000: /* 48k */
 		mask = RM_PLLCTL1C_PDB_PLL1;
 		val = RV_PLLCTL1C_PDB_PLL1_ENABLE;
 		break;
-	case 112896000: // 44.1k
+	case 112896000: /* 44.1k */
 		mask = RM_PLLCTL1C_PDB_PLL2;
 		val = RV_PLLCTL1C_PDB_PLL2_ENABLE;
 		break;
@@ -1243,60 +1233,60 @@ static ssize_t ctrl_reg_addr_show(struct kobject *kobj,
 	}
 
 static struct tempo_control_reg control_regs[] = {
-	TEMPO_CONTROL_REG(config0, R_CONFIG0),		// 0x1F
-	TEMPO_CONTROL_REG(config1, R_CONFIG1),		// 0x20
-	TEMPO_CONTROL_REG(clectl, R_CLECTL),		// 0x25
-	TEMPO_CONTROL_REG(mugain, R_MUGAIN),		// 0x26
-	TEMPO_CONTROL_REG(compth, R_COMPTH),		// 0x27
-	TEMPO_CONTROL_REG(cmprat, R_CMPRAT),		// 0x28
-	TEMPO_CONTROL_REG(catktcl, R_CATKTCL),		// 0x29
-	TEMPO_CONTROL_REG(catktch, R_CATKTCH),		// 0x2A
-	TEMPO_CONTROL_REG(creltcl, R_CRELTCL),		// 0x2B
-	TEMPO_CONTROL_REG(creltch, R_CRELTCH),		// 0x2C
-	TEMPO_CONTROL_REG(limth, R_LIMTH),		// 0x2D
-	TEMPO_CONTROL_REG(limtgt, R_LIMTGT),		// 0x2E
-	TEMPO_CONTROL_REG(latktcl, R_LATKTCL),		// 0x2F
-	TEMPO_CONTROL_REG(latktch, R_LATKTCH),		// 0x30
-	TEMPO_CONTROL_REG(lreltcl, R_LRELTCL),		// 0x31
-	TEMPO_CONTROL_REG(lreltch, R_LRELTCH),		// 0x32
-	TEMPO_CONTROL_REG(expth, R_EXPTH),		// 0x33
-	TEMPO_CONTROL_REG(exprat, R_EXPRAT),		// 0x34
-	TEMPO_CONTROL_REG(xatktcl, R_XATKTCL),		// 0x35
-	TEMPO_CONTROL_REG(xatktch, R_XATKTCH),		// 0x36
-	TEMPO_CONTROL_REG(xreltcl, R_XRELTCL),		// 0x37
-	TEMPO_CONTROL_REG(xreltch, R_XRELTCH),		// 0x38
-	TEMPO_CONTROL_REG(fxctl, R_FXCTL),		// 0x39
-	TEMPO_CONTROL_REG(daccrwrl, R_DACCRWRL),	// 0x3A
-	TEMPO_CONTROL_REG(daccrwrm, R_DACCRWRM),	// 0x3B
-	TEMPO_CONTROL_REG(daccrwrh, R_DACCRWRH),	// 0x3C
-	TEMPO_CONTROL_REG(daccrrdl, R_DACCRRDL),	// 0x3D
-	TEMPO_CONTROL_REG(daccrrdm, R_DACCRRDM),	// 0x3E
-	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	// 0x3F
-	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	// 0x40
-	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		// 0x41
-	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	// 0xC7
-	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	// 0xC8
-	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	// 0xC9
-	TEMPO_CONTROL_REG(dacmbcthr1, R_DACMBCTHR1),	// 0xCA
-	TEMPO_CONTROL_REG(dacmbcrat1, R_DACMBCRAT1),	// 0xCB
-	TEMPO_CONTROL_REG(dacmbcatk1l, R_DACMBCATK1L),	// 0xCC
-	TEMPO_CONTROL_REG(dacmbcatk1h, R_DACMBCATK1H),	// 0xCD
-	TEMPO_CONTROL_REG(dacmbcrel1l, R_DACMBCREL1L),	// 0xCE
-	TEMPO_CONTROL_REG(dacmbcrel1h, R_DACMBCREL1H),	// 0xCF
-	TEMPO_CONTROL_REG(dacmbcmug2, R_DACMBCMUG2),	// 0xD0
-	TEMPO_CONTROL_REG(dacmbcthr2, R_DACMBCTHR2),	// 0xD1
-	TEMPO_CONTROL_REG(dacmbcrat2, R_DACMBCRAT2),	// 0xD2
-	TEMPO_CONTROL_REG(dacmbcatk2l, R_DACMBCATK2L),	// 0xD3
-	TEMPO_CONTROL_REG(dacmbcatk2h, R_DACMBCATK2H),	// 0xD4
-	TEMPO_CONTROL_REG(dacmbcrel2l, R_DACMBCREL2L),	// 0xD5
-	TEMPO_CONTROL_REG(dacmbcrel2h, R_DACMBCREL2H),	// 0xD6
-	TEMPO_CONTROL_REG(dacmbcmug3, R_DACMBCMUG3),	// 0xD7
-	TEMPO_CONTROL_REG(dacmbcthr3, R_DACMBCTHR3),	// 0xD8
-	TEMPO_CONTROL_REG(dacmbcrat3, R_DACMBCRAT3),	// 0xD9
-	TEMPO_CONTROL_REG(dacmbcatk3l, R_DACMBCATK3L),	// 0xDA
-	TEMPO_CONTROL_REG(dacmbcatk3h, R_DACMBCATK3H),	// 0xDB
-	TEMPO_CONTROL_REG(dacmbcrel3l, R_DACMBCREL3L),	// 0xDC
-	TEMPO_CONTROL_REG(dacmbcrel3h, R_DACMBCREL3H),	// 0xDD
+	TEMPO_CONTROL_REG(config0, R_CONFIG0),		/* 0x1F */
+	TEMPO_CONTROL_REG(config1, R_CONFIG1),		/* 0x20 */
+	TEMPO_CONTROL_REG(clectl, R_CLECTL),		/* 0x25 */
+	TEMPO_CONTROL_REG(mugain, R_MUGAIN),		/* 0x26 */
+	TEMPO_CONTROL_REG(compth, R_COMPTH),		/* 0x27 */
+	TEMPO_CONTROL_REG(cmprat, R_CMPRAT),		/* 0x28 */
+	TEMPO_CONTROL_REG(catktcl, R_CATKTCL),		/* 0x29 */
+	TEMPO_CONTROL_REG(catktch, R_CATKTCH),		/* 0x2A */
+	TEMPO_CONTROL_REG(creltcl, R_CRELTCL),		/* 0x2B */
+	TEMPO_CONTROL_REG(creltch, R_CRELTCH),		/* 0x2C */
+	TEMPO_CONTROL_REG(limth, R_LIMTH),		/* 0x2D */
+	TEMPO_CONTROL_REG(limtgt, R_LIMTGT),		/* 0x2E */
+	TEMPO_CONTROL_REG(latktcl, R_LATKTCL),		/* 0x2F */
+	TEMPO_CONTROL_REG(latktch, R_LATKTCH),		/* 0x30 */
+	TEMPO_CONTROL_REG(lreltcl, R_LRELTCL),		/* 0x31 */
+	TEMPO_CONTROL_REG(lreltch, R_LRELTCH),		/* 0x32 */
+	TEMPO_CONTROL_REG(expth, R_EXPTH),		/* 0x33 */
+	TEMPO_CONTROL_REG(exprat, R_EXPRAT),		/* 0x34 */
+	TEMPO_CONTROL_REG(xatktcl, R_XATKTCL),		/* 0x35 */
+	TEMPO_CONTROL_REG(xatktch, R_XATKTCH),		/* 0x36 */
+	TEMPO_CONTROL_REG(xreltcl, R_XRELTCL),		/* 0x37 */
+	TEMPO_CONTROL_REG(xreltch, R_XRELTCH),		/* 0x38 */
+	TEMPO_CONTROL_REG(fxctl, R_FXCTL),		/* 0x39 */
+	TEMPO_CONTROL_REG(daccrwrl, R_DACCRWRL),	/* 0x3A */
+	TEMPO_CONTROL_REG(daccrwrm, R_DACCRWRM),	/* 0x3B */
+	TEMPO_CONTROL_REG(daccrwrh, R_DACCRWRH),	/* 0x3C */
+	TEMPO_CONTROL_REG(daccrrdl, R_DACCRRDL),	/* 0x3D */
+	TEMPO_CONTROL_REG(daccrrdm, R_DACCRRDM),	/* 0x3E */
+	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	/* 0x3F */
+	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	/* 0x40 */
+	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		/* 0x41 */
+	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	/* 0xC7 */
+	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	/* 0xC8 */
+	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	/* 0xC9 */
+	TEMPO_CONTROL_REG(dacmbcthr1, R_DACMBCTHR1),	/* 0xCA */
+	TEMPO_CONTROL_REG(dacmbcrat1, R_DACMBCRAT1),	/* 0xCB */
+	TEMPO_CONTROL_REG(dacmbcatk1l, R_DACMBCATK1L),	/* 0xCC */
+	TEMPO_CONTROL_REG(dacmbcatk1h, R_DACMBCATK1H),	/* 0xCD */
+	TEMPO_CONTROL_REG(dacmbcrel1l, R_DACMBCREL1L),	/* 0xCE */
+	TEMPO_CONTROL_REG(dacmbcrel1h, R_DACMBCREL1H),	/* 0xCF */
+	TEMPO_CONTROL_REG(dacmbcmug2, R_DACMBCMUG2),	/* 0xD0 */
+	TEMPO_CONTROL_REG(dacmbcthr2, R_DACMBCTHR2),	/* 0xD1 */
+	TEMPO_CONTROL_REG(dacmbcrat2, R_DACMBCRAT2),	/* 0xD2 */
+	TEMPO_CONTROL_REG(dacmbcatk2l, R_DACMBCATK2L),	/* 0xD3 */
+	TEMPO_CONTROL_REG(dacmbcatk2h, R_DACMBCATK2H),	/* 0xD4 */
+	TEMPO_CONTROL_REG(dacmbcrel2l, R_DACMBCREL2L),	/* 0xD5 */
+	TEMPO_CONTROL_REG(dacmbcrel2h, R_DACMBCREL2H),	/* 0xD6 */
+	TEMPO_CONTROL_REG(dacmbcmug3, R_DACMBCMUG3),	/* 0xD7 */
+	TEMPO_CONTROL_REG(dacmbcthr3, R_DACMBCTHR3),	/* 0xD8 */
+	TEMPO_CONTROL_REG(dacmbcrat3, R_DACMBCRAT3),	/* 0xD9 */
+	TEMPO_CONTROL_REG(dacmbcatk3l, R_DACMBCATK3L),	/* 0xDA */
+	TEMPO_CONTROL_REG(dacmbcatk3h, R_DACMBCATK3H),	/* 0xDB */
+	TEMPO_CONTROL_REG(dacmbcrel3l, R_DACMBCREL3L),	/* 0xDC */
+	TEMPO_CONTROL_REG(dacmbcrel3h, R_DACMBCREL3H),	/* 0xDD */
 };
 
 static ssize_t control_reg_export_store(struct kobject *kobj,
@@ -1451,7 +1441,7 @@ static inline int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
 	int ret;
 
-	// DAC needs to be powered
+	/* DAC needs to be powered */
 	ret = snd_soc_dapm_force_enable_pin(dapm, "DAC L");
 	if (ret < 0) {
 		dev_err(codec->dev,
@@ -1465,7 +1455,7 @@ static inline int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
 		return ret;
 	}
 
-	// If no one is using the PLL make sure there is a valid rate
+	/* If no one is using the PLL make sure there is a valid rate */
 	if (tscs42xx->pll_users == 0)
 		tscs42xx->samplerate = 48000;
 	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
@@ -1477,7 +1467,7 @@ static inline int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
 	int ret;
 
-	// DAC needs to be powered
+	/* DAC needs to be powered */
 	ret = snd_soc_dapm_disable_pin(dapm, "DAC L");
 	if (ret < 0) {
 		dev_err(codec->dev,
@@ -1549,7 +1539,7 @@ static ssize_t cff_store(struct kobject *kobj, struct kobj_attribute *attr,
 	unsigned int val, store;
 	int ret;
 
-	// Writing to DACCRAM requires PLLs to be powered
+	/* Writing to DACCRAM requires PLLs and DAC to be powered */
 	mutex_lock(&tscs42xx->lock);
 	enable_daccram_access(tscs42xx);
 	mutex_unlock(&tscs42xx->lock);
@@ -1791,7 +1781,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 		}
 	}
 
-	// Power up an interface so the daccram can be accessed
+	/* Power up an interface so the daccram can be accessed */
 	ret = snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL,
 		RV_PWRM2_HPL_ENABLE);
 	if (ret < 0) {
@@ -1799,7 +1789,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 			"Failed to power up interface (%d)\n", ret);
 		goto exit;
 	}
-	tscs42xx->samplerate = 48000; // No valid rate exist yet
+	tscs42xx->samplerate = 48000; /* No valid rate exist yet */
 	ret = power_up_audio_plls(codec, tscs42xx);
 	if (ret < 0)
 		goto exit;
@@ -1917,7 +1907,7 @@ static int tscs42xx_runtime_resume(struct device *dev)
 
 	mutex_lock(&tscs42xx->lock);
 
-	switch(tscs42xx->pll_src_clk) {
+	switch (tscs42xx->pll_src_clk) {
 	case PLL_SRC_CLK_XTAL:
 		break;
 	case PLL_SRC_CLK_MCLK2:
@@ -1966,7 +1956,7 @@ static int tscs42xx_runtime_suspend(struct device *dev)
 	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(dev);
 
 	mutex_lock(&tscs42xx->lock);
- 
+
 	regcache_cache_only(tscs42xx->regmap, true);
 
 	switch (tscs42xx->pll_src_clk) {

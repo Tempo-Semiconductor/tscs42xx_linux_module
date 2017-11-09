@@ -230,6 +230,7 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 	struct device_node *i2s_node;
 	struct snd_soc_dai_link *dai;
 	struct device_node *codec_of_node;
+	struct snd_soc_pcm_runtime *rtd;
 
 	tempo_debug("");
 
@@ -277,14 +278,15 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 			"snd_soc_register_card() failed: %d\n", ret);
 		return -EPROBE_DEFER;
 	}
-	data->codec = (struct snd_soc_codec *) 
-		list_first_entry_or_null(&snd_rpi_tscs42xx.codec_dev_list,
+	rtd = (struct snd_soc_pcm_runtime *) 
+		list_first_entry_or_null(&snd_rpi_tscs42xx.rtd_list,
 						struct snd_soc_card,
-						codec_dev_list);
-	if (NULL == data->codec) {
-		dev_err(&pdev->dev, "Failed to get codec");
+						rtd_list);
+	if (NULL == rtd) {
+		dev_err(&pdev->dev, "Failed to get runtime device");
 		return -EPROBE_DEFER;
 	}
+	data->codec = rtd->codec;
 
 	/* Headphone Jack */
 	data->gpio_hp = of_get_named_gpio_flags(pdev->dev.of_node,
