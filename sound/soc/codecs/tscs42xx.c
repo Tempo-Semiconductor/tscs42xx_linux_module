@@ -106,13 +106,14 @@ static struct reg_default r_inits[] = {
 	{ .reg = R_AIC2,    .def = RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
 };
 
-#define NUM_DACCRAM_BYTES 3
+#define NUM_DACCR_BYTES 3
 static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 {
 	const struct firmware *fw = NULL;
 	int ret;
 	int i;
 	int j;
+	int addr;
 
 	ret = request_firmware_direct(&fw, "tscs42xx_daccram.dfw", codec->dev);
 	if (ret) {
@@ -121,22 +122,47 @@ static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 		return 0;
 	}
 
-	if (fw->size % NUM_DACCRAM_BYTES != 0) {
+	if (fw->size % NUM_DACCR_BYTES != 0) {
 		ret = -EINVAL;
 		dev_err(codec->dev, "Malformed daccram file (%d)\n", ret);
 		return ret;
 	}
 
-	ret = snd_soc_write(codec, R_DACCRADDR, 0x00);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to clear DACCRADDR (%d)\n", ret);
-		return ret;
-	}
+	for (i = 0, addr = 0; i < fw->size; i += NUM_DACCR_BYTES, addr++) {
 
-	for (i = 0; i < fw->size; i += NUM_DACCRAM_BYTES) {
-		for (j = 0; j < NUM_DACCRAM_BYTES; j++) { /* FW in big endian */
+		do {
+			ret = snd_soc_read(codec, R_DACCRSTAT);
+		} while (ret > 0);
+
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to read daccrstat (%d)\n", ret);
+			return ret;
+		}
+
+		/* Explicit address update */
+		ret = snd_soc_write(codec, R_DACCRADDR, addr);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to write DACCRADDR (%d)\n", ret);
+			return ret;
+		}
+
+		for (j = 0; j < NUM_DACCR_BYTES; j++) { /* FW in big endian */
+
+			do {
+				ret = snd_soc_read(codec, R_DACCRSTAT);
+			} while (ret > 0);
+
+			if (ret < 0) {
+				dev_err(codec->dev,
+					"Failed to read daccrstat (%d)\n", ret);
+				return ret;
+			}
+
+			/* There is an auto increment after writing the MSB */
 			ret = snd_soc_write(codec, R_DACCRWRL + j,
-					fw->data[i + 2 - j]);
+					fw->data[i + NUM_DACCR_BYTES - 1 - j]);
 			if (ret < 0) {
 				dev_err(codec->dev,
 					"Failed to write coefficient (%d)\n",
@@ -144,15 +170,6 @@ static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 				return ret;
 			}
 		}
-		do {
-			udelay(10);
-			ret = snd_soc_read(codec, R_DACCRSTAT);
-			if (ret < 0) {
-				dev_err(codec->dev,
-					"Failed to read DACCSTAT (%d)\n", ret);
-				return ret;
-			}
-		} while ((ret & RM_DACCRSTAT_DACCR_BUSY));
 	}
 
 	dev_info(codec->dev, "Loaded tscs42xx_daccram.dfw\n");
@@ -744,9 +761,8 @@ static int power_down_audio_plls(struct snd_soc_codec *codec,
 	int ret;
 
 	tscs42xx->pll_users--;
-	if (tscs42xx->pll_users > 0) {
+	if (tscs42xx->pll_users > 0)
 		return 0;
-	}
 
 	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
 			RM_PLLCTL1C_PDB_PLL1,
@@ -1264,6 +1280,7 @@ static struct tempo_control_reg control_regs[] = {
 	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	/* 0x3F */
 	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	/* 0x40 */
 	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		/* 0x41 */
+	TEMPO_CONTROL_REG(daccrstat, R_DACCRSTAT),	/* 0x8A */
 	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	/* 0xC7 */
 	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	/* 0xC8 */
 	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	/* 0xC9 */
@@ -1789,23 +1806,30 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 			"Failed to power up interface (%d)\n", ret);
 		goto exit;
 	}
+
+	/* PLLs also needed to be powered */
 	tscs42xx->samplerate = 48000; /* No valid rate exist yet */
 	ret = power_up_audio_plls(codec, tscs42xx);
 	if (ret < 0)
 		goto exit;
+
+	mdelay(5);
+
 	ret = load_dac_coefficient_ram(codec);
 	if (ret < 0)
 		dev_info(codec->dev, "Failed to load DAC Coefficients (%d)\n",
 			ret);
+
+	ret = load_control_regs(codec);
+	if (ret < 0)
+		dev_info(codec->dev, "Failed to load controls (%d)\n",
+			ret);
+
 	ret = power_down_audio_plls(codec, tscs42xx);
 	if (ret < 0)
 		goto exit;
 	snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
 
-	ret = load_control_regs(codec);
-	if (ret < 0)
-		dev_info(codec->dev, "Failed to controls (%d)\n",
-			ret);
 
 	ret = 0;
 exit:
@@ -1867,7 +1891,7 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
 		goto exit;
 	}
-	mdelay(1);
+	mdelay(5);
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
