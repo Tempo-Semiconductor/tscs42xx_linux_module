@@ -1,3 +1,15 @@
+/*
+ * tscs42xx.c -- TSCS42xx ALSA SoC Audio driver
+ *
+ * Copyright 2017 Tempo Semiconductor, Inc.
+ *
+ * Author: Steven Eckhoff <steven.eckhoff.opensource@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #ifndef __WOOKIE_H__
 #define __WOOKIE_H__
 

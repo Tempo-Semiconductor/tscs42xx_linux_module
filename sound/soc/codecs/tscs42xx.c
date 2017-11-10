@@ -1,12 +1,13 @@
 /*
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
+ * tscs42xx.c -- TSCS42xx ALSA SoC Audio driver
  *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * Copyright 2017 Tempo Semiconductor, Inc.
+ *
+ * Author: Steven Eckhoff <steven.eckhoff.opensource@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #include <linux/moduleparam.h>
@@ -652,7 +653,7 @@ static const struct pll_ctl *get_pll_ctl(int input_freq)
 	return pll_ctl;
 }
 
-static inline int sample_rate_to_pll_freq_out(int sample_rate)
+static int sample_rate_to_pll_freq_out(int sample_rate)
 {
 	switch (sample_rate) {
 	case 11025:
@@ -1452,7 +1453,7 @@ struct tempo_coefficient {
 	uint8_t addr;
 };
 
-static inline int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
+static int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
 {
 	struct snd_soc_codec *codec = tscs42xx->codec;
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
@@ -1478,7 +1479,7 @@ static inline int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
 	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
 }
 
-static inline int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
+static int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
 {
 	struct snd_soc_codec *codec = tscs42xx->codec;
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
