@@ -831,6 +831,7 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
+	mutex_lock(&tscs42xx->lock);
 
 	ret = setup_sample_format(codec, params_format(params));
 	if (ret < 0) {
@@ -838,8 +839,6 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 			ret);
 		goto exit;
 	}
-
-	mutex_lock(&tscs42xx->lock);
 
 	ret = setup_sample_rate(codec, params_rate(params), tscs42xx);
 	if (ret < 0) {
@@ -893,7 +892,7 @@ static int dac_unmute(struct snd_soc_codec *codec,
 		RV_CNVRTR1_DACMU_DISABLE);
 	if (ret < 0) {
 		power_down_audio_plls(codec, tscs42xx);
-		dev_err(codec->dev, "Failed to mute DAC (%d)\n",
+		dev_err(codec->dev, "Failed to unmute DAC (%d)\n",
 				ret);
 		return ret;
 	}
@@ -985,6 +984,8 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		if (ret < 0)
 			dev_err(codec->dev,
 				"Failed to set codec DAI master (%d)\n", ret);
+		else
+			ret = 0;
 		break;
 	case SND_SOC_DAIFMT_CBS_CFS:
 		ret = -EINVAL;
@@ -997,7 +998,7 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		break;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int tscs42xx_set_bclk_ratio(struct snd_soc_dai *codec_dai,
@@ -1230,11 +1231,8 @@ static ssize_t ctrl_reg_addr_show(struct kobject *kobj,
 {
 	struct tempo_control_reg *control_reg =
 		container_of(attr, struct tempo_control_reg, addr_kobj_attr);
-	int ret = 0;
 
-	ret = sprintf(buf, "0x%02x\n", control_reg->addr);
-
-	return ret;
+	return sprintf(buf, "0x%02x\n", control_reg->addr);
 }
 
 #define TEMPO_CONTROL_REG(_name, _addr)				\
@@ -1400,7 +1398,7 @@ static ssize_t ctrl_show(struct kobject *kobj, struct kobj_attribute *attr,
 		container_of(attr, struct tempo_control, kobj_attr);
 	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control->dev);
 	unsigned int val, show;
-	int ret = 0;
+	int ret;
 
 	ret = regmap_read(tscs42xx->regmap,
 			control->addr,
@@ -1409,9 +1407,7 @@ static ssize_t ctrl_show(struct kobject *kobj, struct kobj_attribute *attr,
 		return ret;
 	show = (val & control->mask) >> control->shift;
 
-	ret = sprintf(buf, "0x%02x\n", show);
-
-	return ret;
+	return sprintf(buf, "0x%02x\n", show);
 }
 
 static ssize_t ctrl_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1421,7 +1417,7 @@ static ssize_t ctrl_store(struct kobject *kobj, struct kobj_attribute *attr,
 		container_of(attr, struct tempo_control, kobj_attr);
 	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control->dev);
 	unsigned int store;
-	int ret = 0;
+	int ret;
 
 	ret = kstrtoint(buf, 0, &store);
 	if (ret < 0)
@@ -1476,6 +1472,7 @@ static int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
 	/* If no one is using the PLL make sure there is a valid rate */
 	if (tscs42xx->pll_users == 0)
 		tscs42xx->samplerate = 48000;
+
 	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
 }
 
@@ -1499,6 +1496,7 @@ static int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
 			"Failed to sync dapm context (%d)\n", ret);
 		return ret;
 	}
+
 	return power_down_audio_plls(tscs42xx->codec, tscs42xx);
 }
 
@@ -1512,8 +1510,10 @@ static ssize_t cff_show(struct kobject *kobj, struct kobj_attribute *attr,
 	int ret;
 
 	mutex_lock(&tscs42xx->lock);
-	enable_daccram_access(tscs42xx);
-	mutex_unlock(&tscs42xx->lock);
+
+	ret = enable_daccram_access(tscs42xx);
+	if (ret < 0)
+		goto early_exit;
 
 	ret = regmap_write(tscs42xx->regmap,
 			R_DACCRADDR,
@@ -1541,8 +1541,9 @@ static ssize_t cff_show(struct kobject *kobj, struct kobj_attribute *attr,
 
 	ret = sprintf(buf, "0x%06x\n", show);
 exit:
-	mutex_lock(&tscs42xx->lock);
 	disable_daccram_access(tscs42xx);
+
+early_exit:
 	mutex_unlock(&tscs42xx->lock);
 
 	return ret;
@@ -1557,10 +1558,11 @@ static ssize_t cff_store(struct kobject *kobj, struct kobj_attribute *attr,
 	unsigned int val, store;
 	int ret;
 
-	/* Writing to DACCRAM requires PLLs and DAC to be powered */
 	mutex_lock(&tscs42xx->lock);
-	enable_daccram_access(tscs42xx);
-	mutex_unlock(&tscs42xx->lock);
+
+	ret = enable_daccram_access(tscs42xx);
+	if (ret < 0)
+		goto early_exit;
 
 	ret = kstrtoint(buf, 0, &store);
 	if (ret < 0)
@@ -1592,8 +1594,9 @@ static ssize_t cff_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	ret = count;
 exit:
-	mutex_lock(&tscs42xx->lock);
 	disable_daccram_access(tscs42xx);
+
+early_exit:
 	mutex_unlock(&tscs42xx->lock);
 
 	return ret;
@@ -1724,7 +1727,7 @@ static int create_sysfs_interface(struct kobject *parent_kobj)
 			ret = sysfs_create_file(dsp_kobj,
 				&dsp_biquads[i].coefficients[j].kobj_attr.attr);
 			if (ret < 0)
-				break;
+				return ret;
 		}
 	}
 
@@ -1735,7 +1738,7 @@ static int create_sysfs_interface(struct kobject *parent_kobj)
 		ret = sysfs_create_file(dsp_kobj,
 			&gen_coefficients[i].kobj_attr.attr);
 		if (ret < 0)
-			break;
+			return ret;
 	}
 
 	controls_kobj = kobject_create_and_add("controls",
@@ -1750,7 +1753,7 @@ static int create_sysfs_interface(struct kobject *parent_kobj)
 		ret = sysfs_create_file(controls_kobj,
 					&controls[i].kobj_attr.attr);
 		if (ret < 0)
-			break;
+			return ret;
 	}
 
 	control_regs_dir_kobj = kobject_create_and_add("control_regs",
@@ -1778,9 +1781,11 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 	mutex_lock(&tscs42xx->lock);
 
 	ret = create_sysfs_interface(&codec->dev->kobj);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_info(codec->dev, "Failed to create dsp interface (%d)\n",
 			ret);
+		goto exit;
+	}
 
 	tscs42xx->codec = codec;
 
@@ -1792,7 +1797,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 
 	for (i = 0; i < ARRAY_SIZE(r_inits); ++i) {
 		ret = snd_soc_write(codec, r_inits[i].reg, r_inits[i].def);
-		if (ret) {
+		if (ret < 0) {
 			dev_err(codec->dev,
 				"Failed to write codec defaults (%d)\n", ret);
 			goto exit;
@@ -1811,26 +1816,34 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 	/* PLLs also needed to be powered */
 	tscs42xx->samplerate = 48000; /* No valid rate exist yet */
 	ret = power_up_audio_plls(codec, tscs42xx);
-	if (ret < 0)
+	if (ret < 0) {
 		goto exit;
-
-	mdelay(5);
+		snd_soc_update_bits(codec, R_PWRM2,
+					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
+	}
 
 	ret = load_dac_coefficient_ram(codec);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_info(codec->dev, "Failed to load DAC Coefficients (%d)\n",
 			ret);
+		power_down_audio_plls(codec, tscs42xx);
+		snd_soc_update_bits(codec, R_PWRM2,
+					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
+		goto exit;
+	}
 
 	ret = load_control_regs(codec);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_info(codec->dev, "Failed to load controls (%d)\n",
 			ret);
-
-	ret = power_down_audio_plls(codec, tscs42xx);
-	if (ret < 0)
+		power_down_audio_plls(codec, tscs42xx);
+		snd_soc_update_bits(codec, R_PWRM2,
+					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
 		goto exit;
-	snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
+	}
 
+	power_down_audio_plls(codec, tscs42xx);
+	snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
 
 	ret = 0;
 exit:
@@ -1879,7 +1892,7 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	}
 
 	ret = part_is_valid(i2c);
-	if (ret < 0 || ret == false) {
+	if (ret <= 0) {
 		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
 		goto exit;
@@ -1892,7 +1905,6 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
 		goto exit;
 	}
-	mdelay(5);
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
