@@ -58,14 +58,14 @@ struct tscs42xx_priv {
 static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
-	case R_DACCRSTAT:
-	case R_DACCRADDR:
 	case R_DACCRWRL:
 	case R_DACCRWRM:
 	case R_DACCRWRH:
 	case R_DACCRRDL:
 	case R_DACCRRDM:
 	case R_DACCRRDH:
+	case R_DACCRSTAT:
+	case R_DACCRADDR:
 	case R_PLLCTL0:
 		return true;
 	default:
@@ -76,8 +76,6 @@ static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
 static bool tscs42xx_precious(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
-	case R_DACCRSTAT:
-	case R_DACCRADDR:
 	case R_DACCRWRL:
 	case R_DACCRWRM:
 	case R_DACCRWRH:
@@ -161,7 +159,7 @@ static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 				return ret;
 			}
 
-			/* There is an auto increment after writing the MSB */
+			/* Write LSB first due to auto increment on MSB */
 			ret = snd_soc_write(codec, R_DACCRWRL + j,
 					fw->data[i + NUM_DACCR_BYTES - 1 - j]);
 			if (ret < 0) {
@@ -508,6 +506,7 @@ static int setup_sample_rate(struct snd_soc_codec *codec,
 		return -EINVAL;
 	}
 
+	/* DAC and ADC share bit and frame clock */
 	ret = snd_soc_update_bits(codec, R_DACSR, RM_DACSR_DBR, br);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to update register (%d)\n", ret);
@@ -1961,83 +1960,6 @@ static int tscs42xx_i2c_remove(struct i2c_client *client)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int tscs42xx_runtime_resume(struct device *dev)
-{
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(dev);
-	int ret;
-
-	mutex_lock(&tscs42xx->lock);
-
-	switch (tscs42xx->pll_src_clk) {
-	case PLL_SRC_CLK_XTAL:
-		break;
-	case PLL_SRC_CLK_MCLK2:
-		ret = clk_set_rate(tscs42xx->mclk, tscs42xx->mclk_src_freq);
-		if (ret < 0) {
-			dev_err(dev,
-				"Could not set mclk rate %d (%d)\n",
-				tscs42xx->mclk_src_freq, ret);
-			goto exit;
-		}
-
-		ret = clk_prepare_enable(tscs42xx->mclk);
-		if (ret < 0) {
-			dev_err(dev, "Failed to enable mclk: (%d)\n",
-				ret);
-			goto exit;
-		}
-		break;
-	}
-
-	regcache_cache_only(tscs42xx->regmap, false);
-
-	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
-	if (ret < 0) {
-		dev_err(dev, "Failed to reset device (%d)\n", ret);
-		goto exit;
-	}
-
-	regcache_mark_dirty(tscs42xx->regmap);
-
-	ret = regcache_sync(tscs42xx->regmap);
-	if (ret < 0) {
-		dev_err(dev, "Failed to sync regcache (%d)\n", ret);
-		goto exit;
-	}
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->lock);
-
-	return ret;
-}
-
-static int tscs42xx_runtime_suspend(struct device *dev)
-{
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(dev);
-
-	mutex_lock(&tscs42xx->lock);
-
-	regcache_cache_only(tscs42xx->regmap, true);
-
-	switch (tscs42xx->pll_src_clk) {
-	case PLL_SRC_CLK_MCLK2:
-		clk_disable_unprepare(tscs42xx->mclk);
-		break;
-	}
-
-	mutex_unlock(&tscs42xx->lock);
-
-	return 0;
-}
-
-static const struct dev_pm_ops tscs42xx_pm = {
-	SET_RUNTIME_PM_OPS(tscs42xx_runtime_suspend,
-			tscs42xx_runtime_resume, NULL)
-};
-#endif
-
 static const struct i2c_device_id tscs42xx_i2c_id[] = {
 	{ "tscs42xx", 0 },
 	{ }
@@ -2055,9 +1977,6 @@ static struct i2c_driver tscs42xx_i2c_driver = {
 		.name = "tscs42xx",
 		.owner = THIS_MODULE,
 		.of_match_table = tscs42xx_of_match,
-#ifdef CONFIG_PM
-		.pm = &tscs42xx_pm,
-#endif
 	},
 	.probe =    tscs42xx_i2c_probe,
 	.remove =   tscs42xx_i2c_remove,
