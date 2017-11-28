@@ -15,28 +15,36 @@ Raspberry Pi Module Build/Install Directions:
 
 $ sudo apt-get install raspberrypi-kernel-headers
 
-2. Build Modules and overlay
+2. Clone the repository
+
+$ git clone https://github.com/Tempo-Semiconductor/tscs42xx_linux_module.git
+
+3. Change directory to the cloned repository 
+
+$ cd tscs42xx_linux_module
+
+4. Build Modules and overlay
 
 $ ./build.sh
 
-3. Install Modules and overlay
+5. Install Modules and overlay
 
 $ sudo ./install.sh
 
-4. Open /boot/config.txt
+6. Open /boot/config.txt
 
 $ sudo vi /boot/config.txt
 
-5. At the bottom of the file you will see the following:
+7. At the bottom of the file you will see the following:
 
 dtparam=audio=on
 
-6. Comment it out using # so it appears as the following:
+8. Comment it out using # so it appears as the following:
 
 #dtparam=audio=on
 
-7. Enable the tempo sound card by adding the following:
+9. Enable the tempo sound card by adding the following:
 
 dtoverlay=rpi-tscs42xx-overlay
 
-8. Save and exit vi and reboot
+10. Save and exit vi and reboot
