@@ -52,7 +52,7 @@ struct tscs42xx_priv {
 	int samplerate;
 	int pll_users;
 	struct snd_soc_codec *codec;
-	struct mutex lock;
+	struct mutex data_lock;
 };
 
 static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
@@ -97,6 +97,7 @@ static const struct regmap_config tscs42xx_regmap = {
 	.max_register = R_DACMBCREL3H,
 
 	.cache_type = REGCACHE_RBTREE,
+	.can_multi_write = true,
 };
 
 static struct reg_default r_inits[] = {
@@ -105,41 +106,43 @@ static struct reg_default r_inits[] = {
 	{ .reg = R_AIC2,    .def = RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
 };
 
-#define NUM_DACCR_BYTES 3
+#define COEFF_SIZE 3
+#define COEFF_MAX_ADDR 0xCD
+#define COEFF_COUNT (COEFF_MAX_ADDR + 1)
+#define COEFF_RAM_SIZE (COEFF_COUNT * COEFF_SIZE)
+#define COEFF_RAM_TLV_SIZE (COEFF_RAM_SIZE + 2 * sizeof(unsigned int))
 static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 {
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	const struct firmware *fw = NULL;
 	int ret;
 	int i;
-	int j;
 	int addr;
 
 	ret = request_firmware_direct(&fw, "tscs42xx_daccram.dfw", codec->dev);
 	if (ret) {
-		dev_info(codec->dev,
+		dev_dbg(codec->dev,
 			"No tscs42xx_daccram.dfw file found (%d)\n", ret);
 		return 0;
 	}
 
-	if (fw->size % NUM_DACCR_BYTES != 0) {
+	if (fw->size % COEFF_SIZE != 0) {
 		ret = -EINVAL;
 		dev_err(codec->dev, "Malformed daccram file (%d)\n", ret);
 		return ret;
 	}
 
-	for (i = 0, addr = 0; i < fw->size; i += NUM_DACCR_BYTES, addr++) {
+	for (i = 0, addr = 0; i < fw->size; i += COEFF_SIZE, addr++) {
 
 		do {
 			ret = snd_soc_read(codec, R_DACCRSTAT);
-		} while (ret > 0);
+			if (ret < 0) {
+				dev_err(codec->dev,
+					"Failed to read daccrstat (%d)\n", ret);
+				return ret;
+			}
+		} while (ret);
 
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to read daccrstat (%d)\n", ret);
-			return ret;
-		}
-
-		/* Explicit address update */
 		ret = snd_soc_write(codec, R_DACCRADDR, addr);
 		if (ret < 0) {
 			dev_err(codec->dev,
@@ -147,94 +150,432 @@ static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
 			return ret;
 		}
 
-		for (j = 0; j < NUM_DACCR_BYTES; j++) { /* FW in big endian */
-
-			do {
-				ret = snd_soc_read(codec, R_DACCRSTAT);
-			} while (ret > 0);
-
-			if (ret < 0) {
-				dev_err(codec->dev,
-					"Failed to read daccrstat (%d)\n", ret);
-				return ret;
-			}
-
-			/* Write LSB first due to auto increment on MSB */
-			ret = snd_soc_write(codec, R_DACCRWRL + j,
-					fw->data[i + NUM_DACCR_BYTES - 1 - j]);
-			if (ret < 0) {
-				dev_err(codec->dev,
-					"Failed to write coefficient (%d)\n",
-					ret);
-				return ret;
-			}
-		}
-	}
-
-	dev_info(codec->dev, "Loaded tscs42xx_daccram.dfw\n");
-
-	return 0;
-}
-
-#define NUM_CONTROL_BYTES 2
-static int load_control_regs(struct snd_soc_codec *codec)
-{
-	const struct firmware *fw = NULL;
-	int ret;
-	int i;
-
-	ret = request_firmware_direct(&fw, "tscs42xx_controls.dfw", codec->dev);
-	if (ret) {
-		dev_info(codec->dev,
-			"No tscs42xx_controls.dfw file found (%d)\n", ret);
-		return 0;
-	}
-
-	if (fw->size % NUM_CONTROL_BYTES != 0) {
-		ret = -EINVAL;
-		dev_err(codec->dev, "Malformed controls file (%d)\n", ret);
-		return ret;
-	}
-
-	for (i = 0; i < fw->size; i += NUM_CONTROL_BYTES) {
-		ret = snd_soc_write(codec, fw->data[i], fw->data[i + 1]);
+		ret = regmap_bulk_write(tscs42xx->regmap,
+			R_DACCRWRL, &fw->data[i], COEFF_SIZE);
 		if (ret < 0) {
-			dev_err(codec->dev, "Failed to write control (%d)\n",
+			dev_err(codec->dev,
+				"Failed to write coefficient (%d)\n",
 				ret);
 			return ret;
 		}
 	}
 
-	dev_info(codec->dev, "Loaded tscs42xx_controls.dfw\n");
+	dev_dbg(codec->dev, "Loaded tscs42xx_daccram.dfw\n");
 
 	return 0;
 }
 
-#define PLL_LOCK_TIME_MAX 10
+#define MAX_PLL_LOCK_20MS_WAITS 1
 static bool plls_locked(struct snd_soc_codec *codec)
 {
-	int reg;
-	int count;
-	bool ret = false;
+	int ret;
+	int count = MAX_PLL_LOCK_20MS_WAITS;
 
-	for (count = 0; count < PLL_LOCK_TIME_MAX; count++) {
-		reg = snd_soc_read(codec, R_PLLCTL0);
-		if (reg < 0) {
+	do {
+		ret = snd_soc_read(codec, R_PLLCTL0);
+		if (ret < 0) {
 			dev_err(codec->dev,
 				"Failed to read PLL lock status (%d)\n", ret);
-			break;
-		} else if (reg > 0) {
-			ret = true;
-			break;
+			return false;
+		} else if (ret > 0) {
+			return true;
 		}
-		mdelay(1);
+		msleep(20);
+	} while (count--);
+
+	return false;
+}
+
+static int sample_rate_to_pll_freq_out(int sample_rate)
+{
+	switch (sample_rate) {
+	case 11025:
+	case 22050:
+	case 44100:
+	case 88200:
+		return 112896000;
+	case 8000:
+	case 16000:
+	case 32000:
+	case 48000:
+	case 96000:
+		return 122880000;
+	default:
+		return -EINVAL;
 	}
+}
+
+static int power_down_audio_plls(struct snd_soc_codec *codec,
+	struct tscs42xx_priv *tscs42xx)
+{
+	int ret;
+
+	tscs42xx->pll_users--;
+	if (tscs42xx->pll_users > 0)
+		return 0;
+
+	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
+			RM_PLLCTL1C_PDB_PLL1,
+			RV_PLLCTL1C_PDB_PLL1_DISABLE);
+	if (ret < 0) {
+		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
+		return ret;
+	}
+	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
+			RM_PLLCTL1C_PDB_PLL2,
+			RV_PLLCTL1C_PDB_PLL2_DISABLE);
+	if (ret < 0) {
+		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int power_up_audio_plls(struct snd_soc_codec *codec,
+	struct tscs42xx_priv *tscs42xx)
+{
+	int freq_out;
+	int ret;
+	unsigned int mask;
+	unsigned int val;
+
+	freq_out = sample_rate_to_pll_freq_out(tscs42xx->samplerate);
+	switch (freq_out) {
+	case 122880000: /* 48k */
+		mask = RM_PLLCTL1C_PDB_PLL1;
+		val = RV_PLLCTL1C_PDB_PLL1_ENABLE;
+		break;
+	case 112896000: /* 44.1k */
+		mask = RM_PLLCTL1C_PDB_PLL2;
+		val = RV_PLLCTL1C_PDB_PLL2_ENABLE;
+		break;
+	default:
+		ret = -EINVAL;
+		dev_err(codec->dev, "Unrecognized PLL output freq (%d)\n", ret);
+		return ret;
+	}
+
+	ret = snd_soc_update_bits(codec, R_PLLCTL1C, mask, val);
+	if (ret < 0) {
+		dev_err(codec->dev, "Failed to turn PLL on (%d)\n", ret);
+		return ret;
+	}
+
+	if (!plls_locked(codec)) {
+		dev_err(codec->dev, "Failed to lock plls\n");
+		return -ENOMSG;
+	}
+
+	tscs42xx->pll_users++;
+
+	return 0;
+}
+
+static int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
+{
+	struct snd_soc_codec *codec = tscs42xx->codec;
+	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
+	int ret;
+
+	/* DAC needs to be powered */
+	ret = snd_soc_dapm_force_enable_pin(dapm, "DAC L");
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to enable DAC for DACCRAM access (%d)\n", ret);
+		return ret;
+	}
+	ret = snd_soc_dapm_sync(dapm);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to sync dapm context (%d)\n", ret);
+		return ret;
+	}
+
+	/* If no one is using the PLL make sure there is a valid rate */
+	if (tscs42xx->pll_users == 0)
+		tscs42xx->samplerate = 48000;
+
+	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
+}
+
+static int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
+{
+	struct snd_soc_codec *codec = tscs42xx->codec;
+	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
+	int ret;
+
+	/* DAC needs to be powered */
+	ret = snd_soc_dapm_disable_pin(dapm, "DAC L");
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to disable DAC after DACCRAM access (%d)\n",
+			ret);
+		return ret;
+	}
+	ret = snd_soc_dapm_sync(dapm);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to sync dapm context (%d)\n", ret);
+		return ret;
+	}
+
+	return power_down_audio_plls(tscs42xx->codec, tscs42xx);
+}
+
+static int coefficient_get(struct snd_kcontrol *kcontrol,
+	unsigned int __user *bytes, unsigned int size)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	u8 *buffer;
+	unsigned int *type;
+	unsigned int *len;
+	u8 *value;
+	u8 addr;
+	int i;
+	int ret;
+
+	/* We must dump all the coefficients */
+	if (size != COEFF_RAM_TLV_SIZE) {
+		ret = -EINVAL;
+		dev_err(codec->dev,
+			"Cannot read %u bytes. Read must be %u bytes (%d)\n",
+			size, COEFF_RAM_SIZE, ret);
+		goto early_exit_1;
+	}
+
+	buffer = kzalloc(size, GFP_KERNEL);
+	if (!buffer) {
+		ret = -ENOMEM;
+		dev_err(codec->dev,
+			"Failed to allocate memory (%d)\n", ret);
+		goto early_exit_1;
+	}
+	type = (unsigned int *)buffer;
+	*type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	len = (unsigned int *)(buffer + sizeof(unsigned int));
+	*len = COEFF_RAM_SIZE;
+	value = buffer + 2 * sizeof(unsigned int);
+
+	mutex_lock(&tscs42xx->data_lock);
+
+	ret = enable_daccram_access(tscs42xx);
+	if (ret < 0)
+		goto early_exit_2;
+
+	for (i = 0, addr = 0; i < COEFF_RAM_SIZE; i += COEFF_SIZE, addr++) {
+		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set daccram address (%d)\n", ret);
+			goto exit;
+		}
+
+		ret = regmap_bulk_read(tscs42xx->regmap, R_DACCRRDL,
+			&value[i], COEFF_SIZE);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to read coefficient (%d)\n", ret);
+				goto exit;
+		}
+	}
+
+	ret = copy_to_user(bytes, buffer, size);
+	if (ret != 0) {
+		dev_err(codec->dev,
+			"Failed to copy %d bytes to user\n", ret);
+		ret = -EFAULT;
+		goto exit;
+	}
+
+	ret = 0;
+exit:
+	disable_daccram_access(tscs42xx);
+
+early_exit_2:
+	mutex_unlock(&tscs42xx->data_lock);
+	kfree(buffer);
+
+early_exit_1:
+	return ret;
+}
+
+static int coefficient_put(struct snd_kcontrol *kcontrol,
+	const unsigned int __user *bytes, unsigned int size)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	unsigned int stat;
+	unsigned int tl_size = sizeof(unsigned int) * 2;
+	unsigned int c_size = size - tl_size - 1; /* Byte 0 is the address */
+	unsigned int c_count = c_size / COEFF_SIZE;
+	unsigned int i;
+	unsigned int cnt;
+	u8 *buffer;
+	u8 *c_bytes;
+	u8 addr;
+	int ret;
+
+	mutex_lock(&tscs42xx->data_lock);
+
+	ret = enable_daccram_access(tscs42xx);
+	if (ret < 0)
+		goto early_exit_1;
+
+	buffer = kzalloc(size, GFP_KERNEL);
+	if (!buffer) {
+		ret = -ENOMEM;
+		goto early_exit_2;
+	}
+
+	ret = copy_from_user(buffer, bytes, size);
+	if (ret != 0) {
+		dev_err(codec->dev,
+			"Failed to copy %d bytes from user\n", ret);
+		ret = -EFAULT;
+		goto exit;
+	}
+
+	c_bytes = buffer + tl_size + 1;
+
+	addr = buffer[tl_size];
+	if (addr + c_size / COEFF_SIZE > COEFF_MAX_ADDR) {
+		ret = -EINVAL;
+		dev_err(codec->dev,
+			"DACCRM Address is out of range (%d)\n", ret);
+		goto exit;
+	}
+
+	for (i = 0, cnt = 0; cnt < c_count; i += COEFF_SIZE, cnt++, addr++) {
+
+		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set daccram address (%d)\n", ret);
+			goto exit;
+		}
+
+		ret = regmap_bulk_write(tscs42xx->regmap,
+			R_DACCRWRL, &c_bytes[i], COEFF_SIZE);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to write daccram (%d)\n", ret);
+			goto exit;
+		}
+
+		//dev_info(codec->dev,
+		//	"Wrote addr(0x%x) L(0x%x) M(0x%x) H(0x%x)\n",
+		//	addr, c_bytes[i], c_bytes[i + 1], c_bytes[i + 2]);
+
+		do {
+			ret = regmap_read(tscs42xx->regmap, R_DACCRSTAT, &stat);
+			if (ret < 0) {
+				dev_err(codec->dev,
+					"Failed to read daccrstat (%d)\n", ret);
+				goto exit;
+			}
+		} while (stat);
+	}
+
+	ret = 0;
+exit:
+	kfree(buffer);
+
+early_exit_2:
+	disable_daccram_access(tscs42xx);
+
+early_exit_1:
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
 
+static int compressor_attack_time_get(struct snd_kcontrol *kcontrol,
+	unsigned int __user *bytes, unsigned int size)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	unsigned int low;
+	unsigned int hi;
+	u16 buffer;
+	int ret;
+
+	if (size != sizeof(u16)) {
+		dev_err(codec->dev,
+			"Compressor attack is %u bytes (%d)\n",
+			sizeof(u16), -EINVAL);
+		return -EINVAL;
+	}
+
+	ret = regmap_read(tscs42xx->regmap, R_CATKTCL, &low);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to read compressor attack (%d)\n", ret);
+		return ret;
+	}
+	ret = regmap_read(tscs42xx->regmap, R_CATKTCH, &hi);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to read compressor attack (%d)\n", ret);
+		return ret;
+	}
+	buffer = hi << 8 | low;
+
+	ret = copy_to_user(bytes, &buffer, size);
+	if (ret != 0) {
+		dev_err(codec->dev,
+			"Failed to copy %d bytes to user\n", ret);
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
+static int compressor_attack_time_put(struct snd_kcontrol *kcontrol,
+	const unsigned int __user *bytes, unsigned int size)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	u16 buffer;
+	unsigned int byte;
+	int ret;
+
+	if (size != sizeof(u16)) {
+		dev_err(codec->dev,
+			"Compressor attack is %u bytes (%d)\n",
+			sizeof(u16), -EINVAL);
+		return -EINVAL;
+	}
+
+	ret = copy_from_user(&buffer, bytes, size);
+	if (ret != 0) {
+		dev_err(codec->dev,
+			"Failed to copy %d bytes from user\n", ret);
+		return -EFAULT;
+	}
+
+	byte = buffer & 0xff;
+	ret = regmap_write(tscs42xx->regmap, R_CATKTCL, byte);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to write compressor attack (%d)\n", ret);
+		return ret;
+	}
+
+	byte = buffer >> 8 & 0xff;
+	ret = regmap_write(tscs42xx->regmap, R_CATKTCH, byte);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to write compressor attack (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 /* D2S Input Select */
-static const char * const d2s_input_select_text[] = {
+static char const * const d2s_input_select_text[] = {
 	"Line 1", "Line 2"
 };
 
@@ -246,7 +587,7 @@ static const struct snd_kcontrol_new d2s_input_mux =
 SOC_DAPM_ENUM("D2S_IN_MUX", d2s_input_select_enum);
 
 /* Input L Capture Route */
-static const char * const input_select_text[] = {
+static char const * const input_select_text[] = {
 	"Line 1", "Line 2", "Line 3", "D2S"
 };
 
@@ -266,7 +607,7 @@ static const struct snd_kcontrol_new right_input_select =
 SOC_DAPM_ENUM("RIGHT_INPUT_SELECT_ENUM", right_input_select_enum);
 
 /* Input Channel Mapping */
-static const char * const ch_map_select_text[] = {
+static char const * const ch_map_select_text[] = {
 	"Normal", "Left to Right", "Right to Left", "Swap"
 };
 
@@ -277,14 +618,14 @@ SOC_ENUM_SINGLE(R_AIC2, FB_AIC2_ADCDSEL, ARRAY_SIZE(ch_map_select_text),
 static int dapm_vref_event(struct snd_soc_dapm_widget *w,
 			 struct snd_kcontrol *kcontrol, int event)
 {
-	mdelay(5);
+	msleep(20);
 	return 0;
 }
 
 static int dapm_micb_event(struct snd_soc_dapm_widget *w,
 			 struct snd_kcontrol *kcontrol, int event)
 {
-	mdelay(5);
+	msleep(20);
 	return 0;
 }
 
@@ -374,45 +715,164 @@ static const struct snd_soc_dapm_route tscs42xx_intercon[] = {
 	{"ADC R", NULL, "ADC Mute"},
 };
 
-/***********
- * Volumes *
- ***********/
-
-static DECLARE_TLV_DB_SCALE(hpvol, -8850, 75, 0);
-static DECLARE_TLV_DB_SCALE(spkvol, -7725, 75, 0);
-static DECLARE_TLV_DB_SCALE(dacvol, -9563, 38, 0);
-static DECLARE_TLV_DB_SCALE(adcvol, -7125, 38, 0);
-static DECLARE_TLV_DB_SCALE(invol, -1725, 75, 0);
-
-/*********
- * INSEL *
- *********/
-
-static DECLARE_TLV_DB_SCALE(mic_boost_tlv, 0, 1000, 0);
-
 /************
  * CONTROLS *
  ************/
+
+static char const * const eq_band_enable_text[] = {
+	"Prescale only",
+	"Band1",
+	"Band1:2",
+	"Band1:3",
+	"Band1:4",
+	"Band1:5",
+	"Band1:6",
+};
+
+static char const * const level_detection_text[] = {
+	"Average",
+	"Peak",
+};
+
+static char const * const level_detection_window_text[] = {
+	"512 Samples",
+	"64 Samples",
+};
+
+static char const * const compressor_ratio_text[] = {
+	"Reserved", "1.5:1", "2:1", "3:1", "4:1", "5:1", "6:1",
+	"7:1", "8:1", "9:1", "10:1", "11:1", "12:1", "13:1", "14:1",
+	"15:1", "16:1", "17:1", "18:1", "19:1", "20:1",
+};
+
+static DECLARE_TLV_DB_SCALE(hpvol_scale, -8850, 75, 0);
+static DECLARE_TLV_DB_SCALE(spkvol_scale, -7725, 75, 0);
+static DECLARE_TLV_DB_SCALE(dacvol_scale, -9563, 38, 0);
+static DECLARE_TLV_DB_SCALE(adcvol_scale, -7125, 38, 0);
+static DECLARE_TLV_DB_SCALE(invol_scale, -1725, 75, 0);
+static DECLARE_TLV_DB_SCALE(mic_boost_scale, 0, 1000, 0);
+static DECLARE_TLV_DB_MINMAX(mugain_scale, 0, 4650);
+static DECLARE_TLV_DB_MINMAX(compth_scale, -9562, 0);
+
+static const struct soc_enum eq1_band_enable_enum =
+	SOC_ENUM_SINGLE(R_CONFIG1, FB_CONFIG1_EQ1_BE,
+		ARRAY_SIZE(eq_band_enable_text), eq_band_enable_text);
+
+static const struct soc_enum eq2_band_enable_enum =
+	SOC_ENUM_SINGLE(R_CONFIG1, FB_CONFIG1_EQ2_BE,
+		ARRAY_SIZE(eq_band_enable_text), eq_band_enable_text);
+
+static const struct soc_enum cle_level_detection_enum =
+	SOC_ENUM_SINGLE(R_CLECTL, FB_CLECTL_LVL_MODE,
+		ARRAY_SIZE(level_detection_text),
+		level_detection_text);
+
+static const struct soc_enum cle_level_detection_window_enum =
+	SOC_ENUM_SINGLE(R_CLECTL, FB_CLECTL_WINDOWSEL,
+		ARRAY_SIZE(level_detection_window_text),
+		level_detection_window_text);
+
+static const struct soc_enum mbc_level_detection_enums[] = {
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_LVLMODE1,
+		ARRAY_SIZE(level_detection_text),
+			level_detection_text),
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_LVLMODE2,
+		ARRAY_SIZE(level_detection_text),
+			level_detection_text),
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_LVLMODE3,
+		ARRAY_SIZE(level_detection_text),
+			level_detection_text),
+};
+
+static const struct soc_enum mbc_level_detection_window_enums[] = {
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_WINSEL1,
+		ARRAY_SIZE(level_detection_window_text),
+			level_detection_window_text),
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_WINSEL2,
+		ARRAY_SIZE(level_detection_window_text),
+			level_detection_window_text),
+	SOC_ENUM_SINGLE(R_DACMBCCTL, FB_DACMBCCTL_WINSEL3,
+		ARRAY_SIZE(level_detection_window_text),
+			level_detection_window_text),
+};
+
+static const struct soc_enum compressor_ratio_enum =
+	SOC_ENUM_SINGLE(R_CMPRAT, FB_CMPRAT,
+		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
+
 static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Volumes */
 	SOC_DOUBLE_R_TLV("Headphone Playback Volume", R_HPVOLL, R_HPVOLR,
-			FB_HPVOLL, 0x7F, 0, hpvol),
+			FB_HPVOLL, 0x7F, 0, hpvol_scale),
 	SOC_DOUBLE_R_TLV("Speaker Playback Volume", R_SPKVOLL, R_SPKVOLR,
-			FB_SPKVOLL, 0x7F, 0, spkvol),
+			FB_SPKVOLL, 0x7F, 0, spkvol_scale),
 	SOC_DOUBLE_R_TLV("Master Playback Volume", R_DACVOLL, R_DACVOLR,
-			FB_DACVOLL, 0xFF, 0, dacvol),
+			FB_DACVOLL, 0xFF, 0, dacvol_scale),
 	SOC_DOUBLE_R_TLV("PCM Capture Volume", R_ADCVOLL, R_ADCVOLR,
-			FB_ADCVOLL, 0xFF, 0, adcvol),
+			FB_ADCVOLL, 0xFF, 0, adcvol_scale),
 	SOC_DOUBLE_R_TLV("Master Capture Volume", R_INVOLL, R_INVOLR,
-			FB_INVOLL, 0x3F, 0, invol),
+			FB_INVOLL, 0x3F, 0, invol_scale),
 
 	/* INSEL */
 	SOC_DOUBLE_R_TLV("Mic Boost Capture Volume", R_INSELL, R_INSELR,
 			FB_INSELL_MICBSTL, FV_INSELL_MICBSTL_30DB,
-			0, mic_boost_tlv),
+			0, mic_boost_scale),
 
 	/* Input Channel Map */
 	SOC_ENUM("Input Channel Map Switch", ch_map_select_enum),
+
+	/* DSP */
+	SND_SOC_BYTES_TLV("Coefficients", COEFF_RAM_TLV_SIZE,
+		coefficient_get, coefficient_put),
+
+	/* EQ */
+	SOC_SINGLE("EQ1 Switch", R_CONFIG1, FB_CONFIG1_EQ1_EN, 1, 0),
+	SOC_SINGLE("EQ2 Switch", R_CONFIG1, FB_CONFIG1_EQ2_EN, 1, 0),
+	SOC_ENUM("EQ1 Band Enable Switch", eq1_band_enable_enum),
+	SOC_ENUM("EQ2 Band Enable Switch", eq2_band_enable_enum),
+
+	/* CLE */
+	SOC_ENUM("CLE Level Detection Switch",
+		cle_level_detection_enum),
+	SOC_ENUM("CLE Level Detection Window Switch",
+		cle_level_detection_window_enum),
+	SOC_SINGLE("Expander Switch",
+		R_CLECTL, FB_CLECTL_EXP_EN, 1, 0),
+	SOC_SINGLE("Limiter Switch",
+		R_CLECTL, FB_CLECTL_LIMIT_EN, 1, 0),
+	SOC_SINGLE("Compressor Switch",
+		R_CLECTL, FB_CLECTL_COMP_EN, 1, 0),
+	SOC_SINGLE_TLV("CLE Make-Up Gain Playback Volume",
+		R_MUGAIN, FB_MUGAIN_CLEMUG, 0x1f, 0, mugain_scale),
+	SOC_SINGLE_TLV("Compressor Threshold Playback Volume",
+		R_COMPTH, FB_COMPTH, 0xff, 0, compth_scale),
+	SOC_ENUM("Compressor Ratio", compressor_ratio_enum),
+	SND_SOC_BYTES_TLV("Compressor Attack Time", sizeof(u16),
+		compressor_attack_time_get, compressor_attack_time_put),
+
+	/* Effects */
+	SOC_SINGLE("3D Switch", R_FXCTL, FB_FXCTL_3DEN, 1, 0),
+	SOC_SINGLE("Treble Switch", R_FXCTL, FB_FXCTL_TEEN, 1, 0),
+	SOC_SINGLE("Treble Bypass Switch", R_FXCTL, FB_FXCTL_TNLFBYPASS, 1, 0),
+	SOC_SINGLE("Bass Switch", R_FXCTL, FB_FXCTL_BEEN, 1, 0),
+	SOC_SINGLE("Bass Bypass Switch", R_FXCTL, FB_FXCTL_BNLFBYPASS, 1, 0),
+
+	/* MBC */
+	SOC_SINGLE("MBC Band1 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN1, 1, 0),
+	SOC_SINGLE("MBC Band2 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN2, 1, 0),
+	SOC_SINGLE("MBC Band3 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN3, 1, 0),
+	SOC_ENUM("MBC Band1 Level Detection Switch",
+		mbc_level_detection_enums[0]),
+	SOC_ENUM("MBC Band2 Level Detection Switch",
+		mbc_level_detection_enums[1]),
+	SOC_ENUM("MBC Band3 Level Detection Switch",
+		mbc_level_detection_enums[2]),
+	SOC_ENUM("MBC Band1 Level Detection Window Switch",
+		mbc_level_detection_window_enums[0]),
+	SOC_ENUM("MBC Band2 Level Detection Window Switch",
+		mbc_level_detection_window_enums[1]),
+	SOC_ENUM("MBC Band3 Level Detection Window Switch",
+		mbc_level_detection_window_enums[2]),
 };
 
 #define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
@@ -652,25 +1112,6 @@ static const struct pll_ctl *get_pll_ctl(int input_freq)
 	return pll_ctl;
 }
 
-static int sample_rate_to_pll_freq_out(int sample_rate)
-{
-	switch (sample_rate) {
-	case 11025:
-	case 22050:
-	case 44100:
-	case 88200:
-		return 112896000;
-	case 8000:
-	case 16000:
-	case 32000:
-	case 48000:
-	case 96000:
-		return 122880000;
-	default:
-		return -EINVAL;
-	}
-}
-
 
 static int set_pll_ctl_from_input_freq(struct snd_soc_codec *codec,
 		const int input_freq)
@@ -755,73 +1196,6 @@ static int configure_clocks(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int power_down_audio_plls(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
-{
-	int ret;
-
-	tscs42xx->pll_users--;
-	if (tscs42xx->pll_users > 0)
-		return 0;
-
-	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
-			RM_PLLCTL1C_PDB_PLL1,
-			RV_PLLCTL1C_PDB_PLL1_DISABLE);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		return ret;
-	}
-	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
-			RM_PLLCTL1C_PDB_PLL2,
-			RV_PLLCTL1C_PDB_PLL2_DISABLE);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int power_up_audio_plls(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
-{
-	int freq_out;
-	int ret;
-	unsigned int mask;
-	unsigned int val;
-
-	freq_out = sample_rate_to_pll_freq_out(tscs42xx->samplerate);
-	switch (freq_out) {
-	case 122880000: /* 48k */
-		mask = RM_PLLCTL1C_PDB_PLL1;
-		val = RV_PLLCTL1C_PDB_PLL1_ENABLE;
-		break;
-	case 112896000: /* 44.1k */
-		mask = RM_PLLCTL1C_PDB_PLL2;
-		val = RV_PLLCTL1C_PDB_PLL2_ENABLE;
-		break;
-	default:
-		ret = -EINVAL;
-		dev_err(codec->dev, "Unrecognized PLL output freq (%d)\n", ret);
-		return ret;
-	}
-
-	ret = snd_soc_update_bits(codec, R_PLLCTL1C, mask, val);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to turn PLL on (%d)\n", ret);
-		return ret;
-	}
-
-	if (!plls_locked(codec)) {
-		dev_err(codec->dev, "Failed to lock plls\n");
-		return -ENOMSG;
-	}
-
-	tscs42xx->pll_users++;
-
-	return 0;
-}
-
 static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params,
 		struct snd_soc_dai *codec_dai)
@@ -830,7 +1204,7 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
-	mutex_lock(&tscs42xx->lock);
+	mutex_lock(&tscs42xx->data_lock);
 
 	ret = setup_sample_format(codec, params_format(params));
 	if (ret < 0) {
@@ -847,7 +1221,7 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 
 	ret = 0;
 exit:
-	mutex_unlock(&tscs42xx->lock);
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
@@ -952,7 +1326,7 @@ static int tscs42xx_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
-	mutex_lock(&tscs42xx->lock);
+	mutex_lock(&tscs42xx->data_lock);
 
 	if (mute)
 		if (stream == SNDRV_PCM_STREAM_PLAYBACK)
@@ -965,7 +1339,7 @@ static int tscs42xx_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 		else
 			ret = adc_unmute(codec, tscs42xx);
 
-	mutex_unlock(&tscs42xx->lock);
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
@@ -986,11 +1360,6 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		else
 			ret = 0;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
-		ret = -EINVAL;
-		dev_err(codec->dev, "tscs42xx slave mode not supported (%d)\n",
-			ret);
-		break;
 	default:
 		ret = -EINVAL;
 		dev_err(codec->dev, "Unsupported format (%d)\n", ret);
@@ -1008,17 +1377,17 @@ static int tscs42xx_set_bclk_ratio(struct snd_soc_dai *codec_dai,
 	unsigned int value;
 	int ret = 0;
 
-	mutex_lock(&tscs42xx->lock);
+	mutex_lock(&tscs42xx->data_lock);
 
 	switch (ratio) {
 	case 32:
-	value = RV_DACSR_DBCM_32;
+		value = RV_DACSR_DBCM_32;
 		break;
 	case 40:
-	value = RV_DACSR_DBCM_40;
+		value = RV_DACSR_DBCM_40;
 		break;
 	case 64:
-	value = RV_DACSR_DBCM_64;
+		value = RV_DACSR_DBCM_64;
 		break;
 	default:
 		ret = -EINVAL;
@@ -1041,7 +1410,7 @@ static int tscs42xx_set_bclk_ratio(struct snd_soc_dai *codec_dai,
 
 	ret = 0;
 exit:
-	mutex_unlock(&tscs42xx->lock);
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
@@ -1120,7 +1489,7 @@ static int part_is_valid(struct i2c_client *i2c)
 	};
 
 	if (ret)
-		dev_info(&i2c->dev, "Found part 0x%04x\n", val);
+		dev_dbg(&i2c->dev, "Found part 0x%04x\n", val);
 	else
 		dev_err(&i2c->dev, "0x%04x is not a valid part\n", val);
 
@@ -1131,7 +1500,7 @@ static int set_data_from_of(struct i2c_client *i2c,
 		struct tscs42xx_priv *tscs42xx)
 {
 	struct device_node *np = i2c->dev.of_node;
-	const char *mclk_src = NULL;
+	char const *mclk_src = NULL;
 	int ret;
 
 	ret = of_property_read_string(np, "mclk-src", &mclk_src);
@@ -1143,7 +1512,7 @@ static int set_data_from_of(struct i2c_client *i2c,
 	if (!strncmp(mclk_src, "mclk", 4)) {
 		tscs42xx->mclk = devm_clk_get(&i2c->dev, NULL);
 		if (IS_ERR(tscs42xx->mclk)) {
-			dev_info(&i2c->dev, "mclk not present trying again\n");
+			dev_dbg(&i2c->dev, "mclk not present trying again\n");
 			return -EPROBE_DEFER;
 		}
 		tscs42xx->pll_src_clk = PLL_SRC_CLK_MCLK2;
@@ -1168,633 +1537,63 @@ static int set_data_from_of(struct i2c_client *i2c,
 	return 0;
 }
 
-/*******************
- * SYSFS Interface *
- *******************/
-#define FMODE 0664
-
-/* Control Reg Interface */
-
-struct tempo_control_reg {
-	struct device *dev;
-	struct kobject *dir_kobj;
-	struct kobj_attribute val_kobj_attr;
-	struct kobj_attribute addr_kobj_attr;
-	const char *name;
-	const uint8_t addr;
-};
-
-static ssize_t ctrl_reg_val_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	struct tempo_control_reg *control_reg =
-		container_of(attr, struct tempo_control_reg, val_kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control_reg->dev);
-	unsigned int show;
-	int ret = 0;
-
-	ret = regmap_read(tscs42xx->regmap,
-			control_reg->addr,
-			&show);
-	if (ret < 0)
-		return ret;
-
-	ret = sprintf(buf, "0x%02x\n", show);
-
-	return ret;
-}
-
-static ssize_t ctrl_reg_val_store(struct kobject *kobj,
-		struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	struct tempo_control_reg *control_reg =
-		container_of(attr, struct tempo_control_reg, val_kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control_reg->dev);
-	unsigned int store;
-	int ret;
-
-	ret = kstrtoint(buf, 0, &store);
-	if (ret < 0)
-		return ret;
-
-	ret = regmap_write(tscs42xx->regmap, control_reg->addr, store);
-	if (ret < 0)
-		return ret;
-
-	return count;
-}
-
-static ssize_t ctrl_reg_addr_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	struct tempo_control_reg *control_reg =
-		container_of(attr, struct tempo_control_reg, addr_kobj_attr);
-
-	return sprintf(buf, "0x%02x\n", control_reg->addr);
-}
-
-#define TEMPO_CONTROL_REG(_name, _addr)				\
-	{							\
-		NULL,						\
-		NULL,						\
-		__ATTR(value, FMODE, ctrl_reg_val_show,		\
-			ctrl_reg_val_store),			\
-		__ATTR(address, FMODE, ctrl_reg_addr_show,	\
-			NULL),					\
-		.name = __stringify(_name),			\
-		.addr = _addr,					\
-	}
-
-static struct tempo_control_reg control_regs[] = {
-	TEMPO_CONTROL_REG(config0, R_CONFIG0),		/* 0x1F */
-	TEMPO_CONTROL_REG(config1, R_CONFIG1),		/* 0x20 */
-	TEMPO_CONTROL_REG(clectl, R_CLECTL),		/* 0x25 */
-	TEMPO_CONTROL_REG(mugain, R_MUGAIN),		/* 0x26 */
-	TEMPO_CONTROL_REG(compth, R_COMPTH),		/* 0x27 */
-	TEMPO_CONTROL_REG(cmprat, R_CMPRAT),		/* 0x28 */
-	TEMPO_CONTROL_REG(catktcl, R_CATKTCL),		/* 0x29 */
-	TEMPO_CONTROL_REG(catktch, R_CATKTCH),		/* 0x2A */
-	TEMPO_CONTROL_REG(creltcl, R_CRELTCL),		/* 0x2B */
-	TEMPO_CONTROL_REG(creltch, R_CRELTCH),		/* 0x2C */
-	TEMPO_CONTROL_REG(limth, R_LIMTH),		/* 0x2D */
-	TEMPO_CONTROL_REG(limtgt, R_LIMTGT),		/* 0x2E */
-	TEMPO_CONTROL_REG(latktcl, R_LATKTCL),		/* 0x2F */
-	TEMPO_CONTROL_REG(latktch, R_LATKTCH),		/* 0x30 */
-	TEMPO_CONTROL_REG(lreltcl, R_LRELTCL),		/* 0x31 */
-	TEMPO_CONTROL_REG(lreltch, R_LRELTCH),		/* 0x32 */
-	TEMPO_CONTROL_REG(expth, R_EXPTH),		/* 0x33 */
-	TEMPO_CONTROL_REG(exprat, R_EXPRAT),		/* 0x34 */
-	TEMPO_CONTROL_REG(xatktcl, R_XATKTCL),		/* 0x35 */
-	TEMPO_CONTROL_REG(xatktch, R_XATKTCH),		/* 0x36 */
-	TEMPO_CONTROL_REG(xreltcl, R_XRELTCL),		/* 0x37 */
-	TEMPO_CONTROL_REG(xreltch, R_XRELTCH),		/* 0x38 */
-	TEMPO_CONTROL_REG(fxctl, R_FXCTL),		/* 0x39 */
-	TEMPO_CONTROL_REG(daccrwrl, R_DACCRWRL),	/* 0x3A */
-	TEMPO_CONTROL_REG(daccrwrm, R_DACCRWRM),	/* 0x3B */
-	TEMPO_CONTROL_REG(daccrwrh, R_DACCRWRH),	/* 0x3C */
-	TEMPO_CONTROL_REG(daccrrdl, R_DACCRRDL),	/* 0x3D */
-	TEMPO_CONTROL_REG(daccrrdm, R_DACCRRDM),	/* 0x3E */
-	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	/* 0x3F */
-	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	/* 0x40 */
-	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		/* 0x41 */
-	TEMPO_CONTROL_REG(daccrstat, R_DACCRSTAT),	/* 0x8A */
-	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	/* 0xC7 */
-	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	/* 0xC8 */
-	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	/* 0xC9 */
-	TEMPO_CONTROL_REG(dacmbcthr1, R_DACMBCTHR1),	/* 0xCA */
-	TEMPO_CONTROL_REG(dacmbcrat1, R_DACMBCRAT1),	/* 0xCB */
-	TEMPO_CONTROL_REG(dacmbcatk1l, R_DACMBCATK1L),	/* 0xCC */
-	TEMPO_CONTROL_REG(dacmbcatk1h, R_DACMBCATK1H),	/* 0xCD */
-	TEMPO_CONTROL_REG(dacmbcrel1l, R_DACMBCREL1L),	/* 0xCE */
-	TEMPO_CONTROL_REG(dacmbcrel1h, R_DACMBCREL1H),	/* 0xCF */
-	TEMPO_CONTROL_REG(dacmbcmug2, R_DACMBCMUG2),	/* 0xD0 */
-	TEMPO_CONTROL_REG(dacmbcthr2, R_DACMBCTHR2),	/* 0xD1 */
-	TEMPO_CONTROL_REG(dacmbcrat2, R_DACMBCRAT2),	/* 0xD2 */
-	TEMPO_CONTROL_REG(dacmbcatk2l, R_DACMBCATK2L),	/* 0xD3 */
-	TEMPO_CONTROL_REG(dacmbcatk2h, R_DACMBCATK2H),	/* 0xD4 */
-	TEMPO_CONTROL_REG(dacmbcrel2l, R_DACMBCREL2L),	/* 0xD5 */
-	TEMPO_CONTROL_REG(dacmbcrel2h, R_DACMBCREL2H),	/* 0xD6 */
-	TEMPO_CONTROL_REG(dacmbcmug3, R_DACMBCMUG3),	/* 0xD7 */
-	TEMPO_CONTROL_REG(dacmbcthr3, R_DACMBCTHR3),	/* 0xD8 */
-	TEMPO_CONTROL_REG(dacmbcrat3, R_DACMBCRAT3),	/* 0xD9 */
-	TEMPO_CONTROL_REG(dacmbcatk3l, R_DACMBCATK3L),	/* 0xDA */
-	TEMPO_CONTROL_REG(dacmbcatk3h, R_DACMBCATK3H),	/* 0xDB */
-	TEMPO_CONTROL_REG(dacmbcrel3l, R_DACMBCREL3L),	/* 0xDC */
-	TEMPO_CONTROL_REG(dacmbcrel3h, R_DACMBCREL3H),	/* 0xDD */
-};
-
-static ssize_t control_reg_export_store(struct kobject *kobj,
-		struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	int i;
-	int ret;
-	char *nl;
-
-	/* Strip the newline */
-	nl = strchr(buf, '\n');
-	if (nl != NULL)
-		*nl = '\0';
-
-	for (i = 0; i < ARRAY_SIZE(control_regs); i++) {
-		if (strcmp(buf, control_regs[i].name) == 0) {
-
-			if (control_regs[i].dir_kobj)
-				break;
-
-			control_regs[i].dev = kobj_to_dev(kobj->parent);
-			if (!control_regs[i].dev)
-				return -ENODEV;
-			control_regs[i].dir_kobj = kobject_create_and_add(
-				control_regs[i].name, kobj);
-			if (!control_regs[i].dir_kobj)
-				return -ENOMEM;
-			ret = sysfs_create_file(control_regs[i].dir_kobj,
-					&control_regs[i].val_kobj_attr.attr);
-			if (ret < 0)
-				return ret;
-			ret = sysfs_create_file(control_regs[i].dir_kobj,
-					&control_regs[i].addr_kobj_attr.attr);
-			if (ret < 0)
-				return ret;
-
-			return count;
-		}
-	}
-
-	return count;
-}
-
-static ssize_t control_reg_unexport_store(struct kobject *kobj,
-		struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	int i;
-	char *nl;
-
-	/* Strip the newline */
-	nl = strchr(buf, '\n');
-	if (nl != NULL)
-		*nl = '\0';
-
-	for (i = 0; i < ARRAY_SIZE(control_regs); i++) {
-		if (strcmp(buf, control_regs[i].name) == 0) {
-			if (control_regs[i].dir_kobj) {
-				sysfs_remove_file(control_regs[i].dir_kobj,
-					&control_regs[i].val_kobj_attr.attr);
-				sysfs_remove_file(control_regs[i].dir_kobj,
-					&control_regs[i].addr_kobj_attr.attr);
-				kobject_put(control_regs[i].dir_kobj);
-				control_regs[i].dir_kobj = NULL;
-				return count;
-			}
-		}
-	}
-
-	return count;
-}
-
-static struct kobj_attribute control_reg_export =
-	__ATTR(export, 0664, NULL, control_reg_export_store);
-static struct kobj_attribute control_reg_unexport =
-	__ATTR(unexport, 0664, NULL, control_reg_unexport_store);
-
-/* Control Interface */
-
-struct tempo_control {
-	struct device *dev;
-	struct kobj_attribute kobj_attr;
-	uint8_t addr;
-	uint8_t mask;
-	uint8_t shift;
-};
-
-static ssize_t ctrl_show(struct kobject *kobj, struct kobj_attribute *attr,
-		char *buf)
-{
-	struct tempo_control *control =
-		container_of(attr, struct tempo_control, kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control->dev);
-	unsigned int val, show;
-	int ret;
-
-	ret = regmap_read(tscs42xx->regmap,
-			control->addr,
-			&val);
-	if (ret < 0)
-		return ret;
-	show = (val & control->mask) >> control->shift;
-
-	return sprintf(buf, "0x%02x\n", show);
-}
-
-static ssize_t ctrl_store(struct kobject *kobj, struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	struct tempo_control *control =
-		container_of(attr, struct tempo_control, kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(control->dev);
-	unsigned int store;
-	int ret;
-
-	ret = kstrtoint(buf, 0, &store);
-	if (ret < 0)
-		return ret;
-
-	store = store << control->shift;
-	ret = regmap_update_bits(tscs42xx->regmap,
-				control->addr, control->mask, store);
-	if (ret < 0)
-		return ret;
-
-	return count;
-}
-
-#define TEMPO_CONTROL(_name, _addr, _mask, _shift)			\
-	{								\
-		NULL,							\
-		__ATTR(_name, FMODE, ctrl_show, ctrl_store),		\
-		.addr = _addr,						\
-		.mask = _mask,						\
-		.shift = _shift,					\
-	}
-
-/* Coefficient Interface */
-
-struct tempo_coefficient {
-	struct device *dev;
-	struct kobj_attribute kobj_attr;
-	uint8_t addr;
-};
-
-static int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
-{
-	struct snd_soc_codec *codec = tscs42xx->codec;
-	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
-	int ret;
-
-	/* DAC needs to be powered */
-	ret = snd_soc_dapm_force_enable_pin(dapm, "DAC L");
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to enable DAC for DACCRAM access (%d)\n", ret);
-		return ret;
-	}
-	ret = snd_soc_dapm_sync(dapm);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to sync dapm context (%d)\n", ret);
-		return ret;
-	}
-
-	/* If no one is using the PLL make sure there is a valid rate */
-	if (tscs42xx->pll_users == 0)
-		tscs42xx->samplerate = 48000;
-
-	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
-}
-
-static int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
-{
-	struct snd_soc_codec *codec = tscs42xx->codec;
-	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
-	int ret;
-
-	/* DAC needs to be powered */
-	ret = snd_soc_dapm_disable_pin(dapm, "DAC L");
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to disable DAC after DACCRAM access (%d)\n",
-			ret);
-		return ret;
-	}
-	ret = snd_soc_dapm_sync(dapm);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to sync dapm context (%d)\n", ret);
-		return ret;
-	}
-
-	return power_down_audio_plls(tscs42xx->codec, tscs42xx);
-}
-
-static ssize_t cff_show(struct kobject *kobj, struct kobj_attribute *attr,
-		char *buf)
-{
-	struct tempo_coefficient *coefficient =
-			container_of(attr, struct tempo_coefficient, kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(coefficient->dev);
-	unsigned int val, show;
-	int ret;
-
-	mutex_lock(&tscs42xx->lock);
-
-	ret = enable_daccram_access(tscs42xx);
-	if (ret < 0)
-		goto early_exit;
-
-	ret = regmap_write(tscs42xx->regmap,
-			R_DACCRADDR,
-			coefficient->addr);
-	if (ret < 0)
-		goto exit;
-	ret = regmap_read(tscs42xx->regmap,
-			R_DACCRRDL,
-			&val);
-	if (ret < 0)
-		goto exit;
-	show = val;
-	ret = regmap_read(tscs42xx->regmap,
-			R_DACCRRDM,
-			&val);
-	if (ret < 0)
-		goto exit;
-	show |= (val << 8);
-	ret = regmap_read(tscs42xx->regmap,
-			R_DACCRRDH,
-			&val);
-	if (ret < 0)
-		goto exit;
-	show |= (val << 16);
-
-	ret = sprintf(buf, "0x%06x\n", show);
-exit:
-	disable_daccram_access(tscs42xx);
-
-early_exit:
-	mutex_unlock(&tscs42xx->lock);
-
-	return ret;
-}
-
-static ssize_t cff_store(struct kobject *kobj, struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	struct tempo_coefficient *coefficient =
-			container_of(attr, struct tempo_coefficient, kobj_attr);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(coefficient->dev);
-	unsigned int val, store;
-	int ret;
-
-	mutex_lock(&tscs42xx->lock);
-
-	ret = enable_daccram_access(tscs42xx);
-	if (ret < 0)
-		goto early_exit;
-
-	ret = kstrtoint(buf, 0, &store);
-	if (ret < 0)
-		goto exit;
-
-	ret = regmap_write(tscs42xx->regmap,
-			R_DACCRADDR,
-			coefficient->addr);
-	if (ret < 0)
-		goto exit;
-	val = store & 0xff;
-	ret = regmap_write(tscs42xx->regmap,
-			R_DACCRWRL,
-			val);
-	if (ret < 0)
-		goto exit;
-	val = (store >> 8) & 0xff;
-	ret = regmap_write(tscs42xx->regmap,
-			R_DACCRWRM,
-			val);
-	if (ret < 0)
-		goto exit;
-	val = (store >> 16) & 0xff;
-	ret = regmap_write(tscs42xx->regmap,
-			R_DACCRWRH,
-			val);
-	if (ret < 0)
-		goto exit;
-
-	ret = count;
-exit:
-	disable_daccram_access(tscs42xx);
-
-early_exit:
-	mutex_unlock(&tscs42xx->lock);
-
-	return ret;
-}
-
-#define TEMPO_COEFFICIENT(_name, _addr)					\
-	{								\
-		NULL,							\
-		__ATTR(_name, FMODE, cff_show, cff_store),		\
-		.addr = _addr,						\
-	}
-
-#define BQC_COUNT 5
-
-struct tempo_biquad {
-	struct tempo_coefficient coefficients[BQC_COUNT];
-};
-
-#define TEMPO_BIQUAD(name, addr)					\
-	{								\
-		.coefficients = {					\
-			TEMPO_COEFFICIENT(name ## _b0, ((addr) + 0)),	\
-			TEMPO_COEFFICIENT(name ## _b1, ((addr) + 1)),	\
-			TEMPO_COEFFICIENT(name ## _b2, ((addr) + 2)),	\
-			TEMPO_COEFFICIENT(name ## _a1, ((addr) + 3)),	\
-			TEMPO_COEFFICIENT(name ## _a2, ((addr) + 4))	\
-		},							\
-	}
-
-static struct tempo_biquad dsp_biquads[] = {
-	/* EQ1 */
-	TEMPO_BIQUAD(eq1_ch0_band1, 0x00),
-	TEMPO_BIQUAD(eq1_ch0_band2, 0x05),
-	TEMPO_BIQUAD(eq1_ch0_band3, 0x0a),
-	TEMPO_BIQUAD(eq1_ch0_band4, 0x0f),
-	TEMPO_BIQUAD(eq1_ch0_band5, 0x14),
-	TEMPO_BIQUAD(eq1_ch0_band6, 0x19),
-	TEMPO_BIQUAD(eq1_ch1_band1, 0x20),
-	TEMPO_BIQUAD(eq1_ch1_band2, 0x25),
-	TEMPO_BIQUAD(eq1_ch1_band3, 0x2a),
-	TEMPO_BIQUAD(eq1_ch1_band4, 0x2f),
-	TEMPO_BIQUAD(eq1_ch1_band5, 0x34),
-	TEMPO_BIQUAD(eq1_ch1_band6, 0x39),
-	/* EQ2 */
-	TEMPO_BIQUAD(eq2_ch0_band1, 0x40),
-	TEMPO_BIQUAD(eq2_ch0_band2, 0x45),
-	TEMPO_BIQUAD(eq2_ch0_band3, 0x4a),
-	TEMPO_BIQUAD(eq2_ch0_band4, 0x4f),
-	TEMPO_BIQUAD(eq2_ch0_band5, 0x54),
-	TEMPO_BIQUAD(eq2_ch0_band6, 0x59),
-	TEMPO_BIQUAD(eq2_ch1_band1, 0x60),
-	TEMPO_BIQUAD(eq2_ch1_band2, 0x65),
-	TEMPO_BIQUAD(eq2_ch1_band3, 0x6a),
-	TEMPO_BIQUAD(eq2_ch1_band4, 0x6f),
-	TEMPO_BIQUAD(eq2_ch1_band5, 0x74),
-	TEMPO_BIQUAD(eq2_ch1_band6, 0x79),
-	/* Bass */
-	TEMPO_BIQUAD(bass_ext1, 0x80),
-	TEMPO_BIQUAD(bass_ext2, 0x85),
-	TEMPO_BIQUAD(bass_lmt, 0x8c),
-	TEMPO_BIQUAD(bass_cto, 0x91),
-	/* Treble */
-	TEMPO_BIQUAD(treb_ext1, 0x97),
-	TEMPO_BIQUAD(treb_ext2, 0x9c),
-	TEMPO_BIQUAD(treb_lmt, 0xa3),
-	TEMPO_BIQUAD(treb_cto, 0xa8),
-	/* Multi Band Compressor */
-	TEMPO_BIQUAD(mbc_1_bq1, 0xb0),
-	TEMPO_BIQUAD(mbc_1_bq2, 0xb5),
-	TEMPO_BIQUAD(mbc_2_bq1, 0xba),
-	TEMPO_BIQUAD(mbc_2_bq2, 0xbf),
-	TEMPO_BIQUAD(mbc_3_bq1, 0xc4),
-	TEMPO_BIQUAD(mbc_3_bq2, 0xc9),
-};
-
-static struct tempo_coefficient gen_coefficients[] = {
-	/* 3D */
-	TEMPO_COEFFICIENT(3d_coef, 0xae),
-	TEMPO_COEFFICIENT(3d_mix, 0xaf),
-	/* EQ1 */
-	TEMPO_COEFFICIENT(eq1_ch0_prescale, 0x1f),
-	TEMPO_COEFFICIENT(eq1_ch1_prescale, 0x3f),
-	/* EQ2 */
-	TEMPO_COEFFICIENT(eq2_ch0_prescale, 0x5f),
-	TEMPO_COEFFICIENT(eq2_ch1_prescale, 0x7f),
-	/* Bass */
-	TEMPO_COEFFICIENT(bass_nlf_m1, 0x8a),
-	TEMPO_COEFFICIENT(bass_nlf_m2, 0x8b),
-	TEMPO_COEFFICIENT(bass_mix, 0x96),
-	/* Treble */
-	TEMPO_COEFFICIENT(treb_nlf_m1, 0xa1),
-	TEMPO_COEFFICIENT(treb_nlf_m2, 0xa2),
-	TEMPO_COEFFICIENT(treb_mix, 0xad),
-};
-
-static struct tempo_control controls[] = {
-	TEMPO_CONTROL(eq1_en, R_CONFIG1,
-			RM_CONFIG1_EQ1_EN, FB_CONFIG1_EQ1_EN),
-
-	TEMPO_CONTROL(eq1_bands_en, R_CONFIG1,
-			RM_CONFIG1_EQ1_BE, FB_CONFIG1_EQ1_BE),
-
-	TEMPO_CONTROL(eq2_en, R_CONFIG1,
-			RM_CONFIG1_EQ2_EN, FB_CONFIG1_EQ2_EN),
-
-	TEMPO_CONTROL(eq2_bands_en, R_CONFIG1,
-			RM_CONFIG1_EQ2_BE, FB_CONFIG1_EQ2_BE),
-
-	TEMPO_CONTROL(cle_level_mode, R_CLECTL,
-			RM_CLECTL_LVL_MODE, FB_CLECTL_LVL_MODE),
-
-	TEMPO_CONTROL(cle_level_detect_window, R_CLECTL,
-			RM_CLECTL_WINDOWSEL, FB_CLECTL_WINDOWSEL),
-
-	TEMPO_CONTROL(exp_en, R_CLECTL, RM_CLECTL_EXP_EN, FB_CLECTL_EXP_EN),
-
-	TEMPO_CONTROL(limit_en, R_CLECTL, RM_CLECTL_LIMIT_EN,
-		FB_CLECTL_LIMIT_EN),
-
-	TEMPO_CONTROL(comp_en, R_CLECTL, RM_CLECTL_COMP_EN, FB_CLECTL_COMP_EN),
-
-	TEMPO_CONTROL(3d_en, R_FXCTL, RM_FXCTL_3DEN, FB_FXCTL_3DEN),
-
-	TEMPO_CONTROL(treb_en, R_FXCTL, RM_FXCTL_TEEN, FB_FXCTL_TEEN),
-
-	TEMPO_CONTROL(treb_nlf_bypass, R_FXCTL, RM_FXCTL_TNLFBYPASS,
-		FB_FXCTL_TNLFBYPASS),
-
-	TEMPO_CONTROL(bass_en, R_FXCTL, RM_FXCTL_BEEN, FB_FXCTL_BEEN),
-
-	TEMPO_CONTROL(bass_nlf_bypass, R_FXCTL, RM_FXCTL_BNLFBYPASS,
-		FB_FXCTL_BNLFBYPASS),
-};
-
-static int create_sysfs_interface(struct kobject *parent_kobj)
-{
-	struct kobject *dsp_kobj;
-	struct kobject *controls_kobj;
-	struct kobject *control_regs_dir_kobj;
-	int i, j;
-	int ret;
-
-	dsp_kobj = kobject_create_and_add("dsp", parent_kobj);
-	if (!dsp_kobj)
-		return -ENOMEM;
-
-	for (i = 0; i < ARRAY_SIZE(dsp_biquads); i++) {
-		for (j = 0; j < BQC_COUNT; j++) {
-			dsp_biquads[i].coefficients[j].dev =
-				kobj_to_dev(parent_kobj);
-			if (!dsp_biquads[i].coefficients[j].dev)
-				return -ENODEV;
-			ret = sysfs_create_file(dsp_kobj,
-				&dsp_biquads[i].coefficients[j].kobj_attr.attr);
-			if (ret < 0)
-				return ret;
-		}
-	}
-
-	for (i = 0; i < ARRAY_SIZE(gen_coefficients); i++) {
-		gen_coefficients[i].dev = kobj_to_dev(parent_kobj);
-		if (!gen_coefficients[i].dev)
-			return -ENODEV;
-		ret = sysfs_create_file(dsp_kobj,
-			&gen_coefficients[i].kobj_attr.attr);
-		if (ret < 0)
-			return ret;
-	}
-
-	controls_kobj = kobject_create_and_add("controls",
-		parent_kobj);
-	if (!controls_kobj)
-		return -ENOMEM;
-
-	for (i = 0; i < ARRAY_SIZE(controls); i++) {
-		controls[i].dev = kobj_to_dev(parent_kobj);
-		if (!controls[i].dev)
-			return -ENODEV;
-		ret = sysfs_create_file(controls_kobj,
-					&controls[i].kobj_attr.attr);
-		if (ret < 0)
-			return ret;
-	}
-
-	control_regs_dir_kobj = kobject_create_and_add("control_regs",
-							parent_kobj);
-
-	ret = sysfs_create_file(control_regs_dir_kobj,
-				&control_reg_export.attr);
-	if (ret < 0)
-		return ret;
-
-	ret = sysfs_create_file(control_regs_dir_kobj,
-				&control_reg_unexport.attr);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
+//static struct tempo_control_reg control_regs[] = {
+//	TEMPO_CONTROL_REG(config0, R_CONFIG0),		/* 0x1F */
+//	TEMPO_CONTROL_REG(config1, R_CONFIG1),		/* 0x20 */
+//	TEMPO_CONTROL_REG(clectl, R_CLECTL),		/* 0x25 */
+//	TEMPO_CONTROL_REG(mugain, R_MUGAIN),		/* 0x26 */
+//	TEMPO_CONTROL_REG(compth, R_COMPTH),		/* 0x27 */
+//	TEMPO_CONTROL_REG(cmprat, R_CMPRAT),		/* 0x28 */
+//	TEMPO_CONTROL_REG(catktcl, R_CATKTCL),		/* 0x29 */
+//	TEMPO_CONTROL_REG(catktch, R_CATKTCH),		/* 0x2A */
+//	TEMPO_CONTROL_REG(creltcl, R_CRELTCL),		/* 0x2B */
+//	TEMPO_CONTROL_REG(creltch, R_CRELTCH),		/* 0x2C */
+//	TEMPO_CONTROL_REG(limth, R_LIMTH),		/* 0x2D */
+//	TEMPO_CONTROL_REG(limtgt, R_LIMTGT),		/* 0x2E */
+//	TEMPO_CONTROL_REG(latktcl, R_LATKTCL),		/* 0x2F */
+//	TEMPO_CONTROL_REG(latktch, R_LATKTCH),		/* 0x30 */
+//	TEMPO_CONTROL_REG(lreltcl, R_LRELTCL),		/* 0x31 */
+//	TEMPO_CONTROL_REG(lreltch, R_LRELTCH),		/* 0x32 */
+//	TEMPO_CONTROL_REG(expth, R_EXPTH),		/* 0x33 */
+//	TEMPO_CONTROL_REG(exprat, R_EXPRAT),		/* 0x34 */
+//	TEMPO_CONTROL_REG(xatktcl, R_XATKTCL),		/* 0x35 */
+//	TEMPO_CONTROL_REG(xatktch, R_XATKTCH),		/* 0x36 */
+//	TEMPO_CONTROL_REG(xreltcl, R_XRELTCL),		/* 0x37 */
+//	TEMPO_CONTROL_REG(xreltch, R_XRELTCH),		/* 0x38 */
+//	TEMPO_CONTROL_REG(fxctl, R_FXCTL),		/* 0x39 */
+//	TEMPO_CONTROL_REG(daccrwrl, R_DACCRWRL),	/* 0x3A */
+//	TEMPO_CONTROL_REG(daccrwrm, R_DACCRWRM),	/* 0x3B */
+//	TEMPO_CONTROL_REG(daccrwrh, R_DACCRWRH),	/* 0x3C */
+//	TEMPO_CONTROL_REG(daccrrdl, R_DACCRRDL),	/* 0x3D */
+//	TEMPO_CONTROL_REG(daccrrdm, R_DACCRRDM),	/* 0x3E */
+//	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	/* 0x3F */
+//	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	/* 0x40 */
+//	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		/* 0x41 */
+//	TEMPO_CONTROL_REG(daccrstat, R_DACCRSTAT),	/* 0x8A */
+//	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	/* 0xC7 */
+//	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	/* 0xC8 */
+//	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	/* 0xC9 */
+//	TEMPO_CONTROL_REG(dacmbcthr1, R_DACMBCTHR1),	/* 0xCA */
+//	TEMPO_CONTROL_REG(dacmbcrat1, R_DACMBCRAT1),	/* 0xCB */
+//	TEMPO_CONTROL_REG(dacmbcatk1l, R_DACMBCATK1L),	/* 0xCC */
+//	TEMPO_CONTROL_REG(dacmbcatk1h, R_DACMBCATK1H),	/* 0xCD */
+//	TEMPO_CONTROL_REG(dacmbcrel1l, R_DACMBCREL1L),	/* 0xCE */
+//	TEMPO_CONTROL_REG(dacmbcrel1h, R_DACMBCREL1H),	/* 0xCF */
+//	TEMPO_CONTROL_REG(dacmbcmug2, R_DACMBCMUG2),	/* 0xD0 */
+//	TEMPO_CONTROL_REG(dacmbcthr2, R_DACMBCTHR2),	/* 0xD1 */
+//	TEMPO_CONTROL_REG(dacmbcrat2, R_DACMBCRAT2),	/* 0xD2 */
+//	TEMPO_CONTROL_REG(dacmbcatk2l, R_DACMBCATK2L),	/* 0xD3 */
+//	TEMPO_CONTROL_REG(dacmbcatk2h, R_DACMBCATK2H),	/* 0xD4 */
+//	TEMPO_CONTROL_REG(dacmbcrel2l, R_DACMBCREL2L),	/* 0xD5 */
+//	TEMPO_CONTROL_REG(dacmbcrel2h, R_DACMBCREL2H),	/* 0xD6 */
+//	TEMPO_CONTROL_REG(dacmbcmug3, R_DACMBCMUG3),	/* 0xD7 */
+//	TEMPO_CONTROL_REG(dacmbcthr3, R_DACMBCTHR3),	/* 0xD8 */
+//	TEMPO_CONTROL_REG(dacmbcrat3, R_DACMBCRAT3),	/* 0xD9 */
+//	TEMPO_CONTROL_REG(dacmbcatk3l, R_DACMBCATK3L),	/* 0xDA */
+//	TEMPO_CONTROL_REG(dacmbcatk3h, R_DACMBCATK3H),	/* 0xDB */
+//	TEMPO_CONTROL_REG(dacmbcrel3l, R_DACMBCREL3L),	/* 0xDC */
+//	TEMPO_CONTROL_REG(dacmbcrel3h, R_DACMBCREL3H),	/* 0xDD */
+//};
 
 static int tscs42xx_probe(struct snd_soc_codec *codec)
 {
@@ -1802,14 +1601,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 	int i;
 	int ret;
 
-	mutex_lock(&tscs42xx->lock);
-
-	ret = create_sysfs_interface(&codec->dev->kobj);
-	if (ret < 0) {
-		dev_info(codec->dev, "Failed to create dsp interface (%d)\n",
-			ret);
-		goto exit;
-	}
+	mutex_lock(&tscs42xx->data_lock);
 
 	tscs42xx->codec = codec;
 
@@ -1848,17 +1640,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 
 	ret = load_dac_coefficient_ram(codec);
 	if (ret < 0) {
-		dev_info(codec->dev, "Failed to load DAC Coefficients (%d)\n",
-			ret);
-		power_down_audio_plls(codec, tscs42xx);
-		snd_soc_update_bits(codec, R_PWRM2,
-					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
-		goto exit;
-	}
-
-	ret = load_control_regs(codec);
-	if (ret < 0) {
-		dev_info(codec->dev, "Failed to load controls (%d)\n",
+		dev_dbg(codec->dev, "Failed to load DAC Coefficients (%d)\n",
 			ret);
 		power_down_audio_plls(codec, tscs42xx);
 		snd_soc_update_bits(codec, R_PWRM2,
@@ -1871,7 +1653,7 @@ static int tscs42xx_probe(struct snd_soc_codec *codec)
 
 	ret = 0;
 exit:
-	mutex_unlock(&tscs42xx->lock);
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
@@ -1904,8 +1686,8 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	if (!tscs42xx)
 		return -ENOMEM;
 
-	mutex_init(&tscs42xx->lock);
-	mutex_lock(&tscs42xx->lock);
+	mutex_init(&tscs42xx->data_lock);
+	mutex_lock(&tscs42xx->data_lock);
 
 	tscs42xx->pll_users = 0;
 
@@ -1948,7 +1730,7 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 
 	ret = 0;
 exit:
-	mutex_unlock(&tscs42xx->lock);
+	mutex_unlock(&tscs42xx->data_lock);
 
 	return ret;
 }
@@ -1983,23 +1765,7 @@ static struct i2c_driver tscs42xx_i2c_driver = {
 	.id_table = tscs42xx_i2c_id,
 };
 
-static int __init tscs42xx_modinit(void)
-{
-	int ret = 0;
-
-	ret = i2c_add_driver(&tscs42xx_i2c_driver);
-	if (ret < 0)
-		pr_err("Failed to register TSCS42xx I2C driver (%d)\n", ret);
-
-	return ret;
-}
-module_init(tscs42xx_modinit);
-
-static void __exit tscs42xx_exit(void)
-{
-	i2c_del_driver(&tscs42xx_i2c_driver);
-}
-module_exit(tscs42xx_exit);
+module_i2c_driver(tscs42xx_i2c_driver);
 
 MODULE_AUTHOR("Tempo Semiconductor <steven.eckhoff.opensource@gmail.com");
 MODULE_DESCRIPTION("ASoC TSCS42xx driver");
