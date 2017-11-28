@@ -45,6 +45,7 @@ enum {
  */
 struct tscs42xx_priv {
 	struct regmap *regmap;
+	struct device *dev;
 	struct clk *mclk;
 	int mclk_src_freq;
 	int pll_src_clk;
@@ -1436,39 +1437,18 @@ static struct snd_soc_dai_driver tscs42xx_dai = {
 	.symmetric_rates = 1,
 };
 
-static int tscs42xx_i2c_read(struct i2c_client *i2c, u8 reg, u8 *val)
-{
-	int ret;
-
-	ret = i2c_smbus_write_byte(i2c, reg);
-	if (ret < 0) {
-		dev_err(&i2c->dev, "I2C write failed (%d)\n", ret);
-		return ret;
-	}
-
-	ret = i2c_smbus_read_byte(i2c);
-	if (ret < 0) {
-		dev_err(&i2c->dev, "I2C read failed (%d)\n", ret);
-		return ret;
-	}
-
-	*val = (u8)ret;
-
-	return 0;
-}
-
-static int part_is_valid(struct i2c_client *i2c)
+static int part_is_valid(struct tscs42xx_priv *tscs42xx)
 {
 	int val;
 	int ret;
-	u8 reg;
+	unsigned int reg;
 
-	ret = tscs42xx_i2c_read(i2c, R_DEVIDH, &reg);
+	ret = regmap_read(tscs42xx->regmap, R_DEVIDH, &reg);
 	if (ret < 0)
 		return ret;
 
 	val = reg << 8;
-	ret = tscs42xx_i2c_read(i2c, R_DEVIDL, &reg);
+	ret = regmap_read(tscs42xx->regmap, R_DEVIDL, &reg);
 	if (ret < 0)
 		return ret;
 
@@ -1485,9 +1465,9 @@ static int part_is_valid(struct i2c_client *i2c)
 	};
 
 	if (ret)
-		dev_dbg(&i2c->dev, "Found part 0x%04x\n", val);
+		dev_dbg(tscs42xx->dev, "Found part 0x%04x\n", val);
 	else
-		dev_err(&i2c->dev, "0x%04x is not a valid part\n", val);
+		dev_err(tscs42xx->dev, "0x%04x is not a valid part\n", val);
 
 	return ret;
 }
@@ -1681,6 +1661,7 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);
 	if (!tscs42xx)
 		return -ENOMEM;
+	tscs42xx->dev = &i2c->dev;
 
 	mutex_init(&tscs42xx->data_lock);
 	mutex_lock(&tscs42xx->data_lock);
@@ -1693,25 +1674,23 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		goto exit;
 	}
 
-	ret = part_is_valid(i2c);
+	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
+	if (IS_ERR(tscs42xx->regmap)) {
+		ret = PTR_ERR(tscs42xx->regmap);
+		dev_err(&i2c->dev, "Failed to allocat regmap (%d)\n", ret);
+		goto exit;
+	}
+
+	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
 		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
 		goto exit;
 	}
 
-	/* Reset device */
-	ret = i2c_smbus_write_byte_data(i2c, R_RESET,
-			RV_RESET_ENABLE);
+	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
 	if (ret < 0) {
 		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
-		goto exit;
-	}
-
-	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
-	if (IS_ERR(tscs42xx->regmap)) {
-		ret = PTR_ERR(tscs42xx->regmap);
-		dev_err(&i2c->dev, "Failed to allocat regmap (%d)\n", ret);
 		goto exit;
 	}
 
