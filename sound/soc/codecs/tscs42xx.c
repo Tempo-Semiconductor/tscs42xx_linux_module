@@ -464,10 +464,6 @@ static int coefficient_put(struct snd_kcontrol *kcontrol,
 			goto exit;
 		}
 
-		//dev_info(codec->dev,
-		//	"Wrote addr(0x%x) L(0x%x) M(0x%x) H(0x%x)\n",
-		//	addr, c_bytes[i], c_bytes[i + 1], c_bytes[i + 2]);
-
 		do {
 			ret = regmap_read(tscs42xx->regmap, R_DACCRSTAT, &stat);
 			if (ret < 0) {
