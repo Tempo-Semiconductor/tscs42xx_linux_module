@@ -13,6 +13,13 @@
 #ifndef __WOOKIE_H__
 #define __WOOKIE_H__
 
+enum {
+	TSCS42XX_PLL_SRC_NONE,
+	TSCS42XX_PLL_SRC_XTAL,
+	TSCS42XX_PLL_SRC_MCLK1,
+	TSCS42XX_PLL_SRC_MCLK2,
+};
+
 #define R_HPVOLL        0x0
 #define R_HPVOLR        0x1
 #define R_SPKVOLL       0x2

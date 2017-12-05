@@ -16,8 +16,6 @@
 				compatible = "tscs,tscs42xx";
 				reg = <0x69>;
 				status = "okay";
-				mclk-src = "xtal";	
-				mclk-src-freq = <12288000>;
 			};
 		};
 	};
@@ -35,19 +33,21 @@
 			compatible = "rpi-tscs,rpi-tscs42xx";
 			i2s-controller = <&i2s>;
 			audio-codec = <&codec>;
-				audio-routing =
-					"Headphone Jack", "Headphone L",
-					"Headphone Jack", "Headphone R",
-					"Speaker", "Speaker L",
-					"Speaker", "Speaker R",
-					"Line In 3 L", "Digital Mic",
-					"Line In 3 R", "Digital Mic",
-					"Digital Mic", "Digital Mic Enable",
-					"Line In 1 L", "Analog Mic",
-					"Line In 1 R", "Analog Mic",
-					"Analog Mic", "Mic Bias",
-					"Line In 2 L", "Line In",
-					"Line In 2 R", "Line In";
+			mclk-src = "xtal";	
+			mclk-src-freq = <12288000>;
+			audio-routing =
+				"Headphone Jack", "Headphone L",
+				"Headphone Jack", "Headphone R",
+				"Speaker", "Speaker L",
+				"Speaker", "Speaker R",
+				"Line In 3 L", "Digital Mic",
+				"Line In 3 R", "Digital Mic",
+				"Digital Mic", "Digital Mic Enable",
+				"Line In 1 L", "Analog Mic",
+				"Line In 1 R", "Analog Mic",
+				"Analog Mic", "Mic Bias",
+				"Line In 2 L", "Line In",
+				"Line In 2 R", "Line In";
 			status = "okay";
 			hp-gpios = <&gpio 16 1>; //<GPIO_ACTIVE_LOW>;
 		//	mic-gpios = <&gpio 17 0>; //<GPIO_ACTIVE_HIGH>;

@@ -34,26 +34,34 @@
 
 #include "tscs42xx.h"
 
-enum {
-	PLL_SRC_CLK_XTAL,
-	PLL_SRC_CLK_MCLK2,
+#define COEFF_SIZE 3
+#define COEFF_MAX_ADDR 0xCD
+#define COEFF_COUNT (COEFF_MAX_ADDR + 1)
+#define COEFF_RAM_SIZE (COEFF_COUNT * COEFF_SIZE)
+#define COEFF_RAM_TLV_SIZE (COEFF_RAM_SIZE + 2 * sizeof(unsigned int))
+
+struct coeff_ram_tlv {
+	unsigned int type;
+	unsigned int len;
+	u8 val[COEFF_RAM_SIZE];
 };
 
 /*
- * Functions that receive a pointer to data
- * should assume that the data is locked.
+ * Locking order is as it appears in the following struct.
  */
 struct tscs42xx_priv {
-	struct regmap *regmap;
-	struct device *dev;
-	struct clk *mclk;
-	int mclk_src_freq;
-	int pll_src_clk;
+
 	int bclk_ratio;
 	int samplerate;
-	int pll_users;
-	struct snd_soc_codec *codec;
-	struct mutex data_lock;
+	struct mutex audio_params_lock;
+
+	struct coeff_ram_tlv coeff_ram_tlv;
+	bool coeff_ram_synced;
+	struct mutex coeff_ram_lock;
+
+	struct mutex pll_lock;
+
+	struct regmap *regmap;
 };
 
 static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
@@ -102,69 +110,10 @@ static const struct regmap_config tscs42xx_regmap = {
 };
 
 static struct reg_default r_inits[] = {
-	{ .reg = R_ADCSR,   .def = RV_ADCSR_ABCM_64 },
-	{ .reg = R_DACSR,   .def = RV_DACSR_DBCM_64 },
-	{ .reg = R_AIC2,    .def = RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
+	{ .reg = R_ADCSR,	.def = RV_ADCSR_ABCM_64 },
+	{ .reg = R_DACSR,	.def = RV_DACSR_DBCM_64 },
+	{ .reg = R_AIC2,	.def = RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
 };
-
-#define COEFF_SIZE 3
-#define COEFF_MAX_ADDR 0xCD
-#define COEFF_COUNT (COEFF_MAX_ADDR + 1)
-#define COEFF_RAM_SIZE (COEFF_COUNT * COEFF_SIZE)
-#define COEFF_RAM_TLV_SIZE (COEFF_RAM_SIZE + 2 * sizeof(unsigned int))
-static int load_dac_coefficient_ram(struct snd_soc_codec *codec)
-{
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	const struct firmware *fw = NULL;
-	int ret;
-	int i;
-	int addr;
-
-	ret = request_firmware_direct(&fw, "tscs42xx_daccram.dfw", codec->dev);
-	if (ret) {
-		dev_dbg(codec->dev,
-			"No tscs42xx_daccram.dfw file found (%d)\n", ret);
-		return 0;
-	}
-
-	if (fw->size % COEFF_SIZE != 0) {
-		ret = -EINVAL;
-		dev_err(codec->dev, "Malformed daccram file (%d)\n", ret);
-		return ret;
-	}
-
-	for (i = 0, addr = 0; i < fw->size; i += COEFF_SIZE, addr++) {
-
-		do {
-			ret = snd_soc_read(codec, R_DACCRSTAT);
-			if (ret < 0) {
-				dev_err(codec->dev,
-					"Failed to read daccrstat (%d)\n", ret);
-				return ret;
-			}
-		} while (ret);
-
-		ret = snd_soc_write(codec, R_DACCRADDR, addr);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to write DACCRADDR (%d)\n", ret);
-			return ret;
-		}
-
-		ret = regmap_bulk_write(tscs42xx->regmap,
-			R_DACCRWRL, &fw->data[i], COEFF_SIZE);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to write coefficient (%d)\n",
-				ret);
-			return ret;
-		}
-	}
-
-	dev_dbg(codec->dev, "Loaded tscs42xx_daccram.dfw\n");
-
-	return 0;
-}
 
 #define MAX_PLL_LOCK_20MS_WAITS 1
 static bool plls_locked(struct snd_soc_codec *codec)
@@ -206,36 +155,106 @@ static int sample_rate_to_pll_freq_out(int sample_rate)
 	}
 }
 
-static int power_down_audio_plls(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int power_down_audio_plls(struct snd_soc_codec *codec)
 {
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
-	tscs42xx->pll_users--;
-	if (tscs42xx->pll_users > 0)
-		return 0;
+	mutex_lock(&tscs42xx->pll_lock);
 
 	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
 			RM_PLLCTL1C_PDB_PLL1,
 			RV_PLLCTL1C_PDB_PLL1_DISABLE);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		return ret;
+		goto exit;
 	}
 	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
 			RM_PLLCTL1C_PDB_PLL2,
 			RV_PLLCTL1C_PDB_PLL2_DISABLE);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		return ret;
+		goto exit;
+	}
+
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->pll_lock);
+
+	return ret;
+}
+
+/*
+ * Call with coeff_ram_lock
+ */
+static int coefficient_ram_write(struct snd_soc_codec *codec,
+	unsigned int addr, unsigned int coeff_cnt)
+{
+	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	int cnt;
+	int ret;
+
+	for (cnt = 0; cnt < coeff_cnt; cnt++, addr++) {
+
+		dev_info(codec->dev, "Writing addr (0x%x)\n", addr);
+		do {
+			ret = snd_soc_read(codec, R_DACCRSTAT);
+			if (ret < 0) {
+				dev_err(codec->dev,
+					"Failed to read stat (%d)\n", ret);
+				return ret;
+			}
+		} while (ret);
+
+		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to write dac ram address (%d)\n", ret);
+			return ret;
+		}
+
+		ret = regmap_bulk_write(tscs42xx->regmap, R_DACCRWRL,
+			&tscs42xx->coeff_ram_tlv.val[addr * COEFF_SIZE],
+			COEFF_SIZE);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to write dac ram (%d)\n", ret);
+			return ret;
+		}
 	}
 
 	return 0;
 }
 
-static int power_up_audio_plls(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int coefficient_ram_sync(struct snd_soc_codec *codec)
 {
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	int ret;
+
+	mutex_lock(&tscs42xx->coeff_ram_lock);
+
+	if (tscs42xx->coeff_ram_synced == false) {
+		ret = coefficient_ram_write(codec, 0x00, COEFF_COUNT);
+		if (ret < 0)
+			goto exit;
+		tscs42xx->coeff_ram_synced = true;
+	}
+
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
+
+	return ret;
+}
+
+static int do_pll_lock_dependent_work(struct snd_soc_codec *codec)
+{
+	return coefficient_ram_sync(codec);
+}
+
+static int power_up_audio_plls(struct snd_soc_codec *codec)
+{
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int freq_out;
 	int ret;
 	unsigned int mask;
@@ -257,84 +276,40 @@ static int power_up_audio_plls(struct snd_soc_codec *codec,
 		return ret;
 	}
 
+	mutex_lock(&tscs42xx->pll_lock);
+
 	ret = snd_soc_update_bits(codec, R_PLLCTL1C, mask, val);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to turn PLL on (%d)\n", ret);
-		return ret;
+		goto exit;
 	}
 
 	if (!plls_locked(codec)) {
 		dev_err(codec->dev, "Failed to lock plls\n");
-		return -ENOMSG;
+		ret = -ENOMSG;
+		goto exit;
 	}
 
-	tscs42xx->pll_users++;
+	ret = do_pll_lock_dependent_work(codec);
+	if (ret < 0)
+		goto exit;
 
-	return 0;
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->pll_lock);
+
+	return ret;
 }
 
-static int enable_daccram_access(struct tscs42xx_priv *tscs42xx)
-{
-	struct snd_soc_codec *codec = tscs42xx->codec;
-	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
-	int ret;
-
-	/* DAC needs to be powered */
-	ret = snd_soc_dapm_force_enable_pin(dapm, "DAC L");
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to enable DAC for DACCRAM access (%d)\n", ret);
-		return ret;
-	}
-	ret = snd_soc_dapm_sync(dapm);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to sync dapm context (%d)\n", ret);
-		return ret;
-	}
-
-	/* If no one is using the PLL make sure there is a valid rate */
-	if (tscs42xx->pll_users == 0)
-		tscs42xx->samplerate = 48000;
-
-	return power_up_audio_plls(tscs42xx->codec, tscs42xx);
-}
-
-static int disable_daccram_access(struct tscs42xx_priv *tscs42xx)
-{
-	struct snd_soc_codec *codec = tscs42xx->codec;
-	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
-	int ret;
-
-	/* DAC needs to be powered */
-	ret = snd_soc_dapm_disable_pin(dapm, "DAC L");
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to disable DAC after DACCRAM access (%d)\n",
-			ret);
-		return ret;
-	}
-	ret = snd_soc_dapm_sync(dapm);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to sync dapm context (%d)\n", ret);
-		return ret;
-	}
-
-	return power_down_audio_plls(tscs42xx->codec, tscs42xx);
-}
-
+#define TL_SIZE (sizeof(unsigned int) * 2)
+#define V_ADDR_SIZE sizeof(u8)
+#define V_ADDR_OFFSET TL_SIZE
+#define V_COEFF_OFFSET (TL_SIZE + V_ADDR_SIZE)
 static int coefficient_get(struct snd_kcontrol *kcontrol,
 	unsigned int __user *bytes, unsigned int size)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
-	u8 *buffer;
-	unsigned int *type;
-	unsigned int *len;
-	u8 *value;
-	u8 addr;
-	int i;
 	int ret;
 
 	/* We must dump all the coefficients */
@@ -343,46 +318,15 @@ static int coefficient_get(struct snd_kcontrol *kcontrol,
 		dev_err(codec->dev,
 			"Cannot read %u bytes. Read must be %u bytes (%d)\n",
 			size, COEFF_RAM_SIZE, ret);
-		goto early_exit_1;
+		return -EINVAL;
 	}
 
-	buffer = kzalloc(size, GFP_KERNEL);
-	if (!buffer) {
-		ret = -ENOMEM;
-		dev_err(codec->dev,
-			"Failed to allocate memory (%d)\n", ret);
-		goto early_exit_1;
-	}
-	type = (unsigned int *)buffer;
-	*type = SNDRV_CTL_ELEM_TYPE_BYTES;
-	len = (unsigned int *)(buffer + sizeof(unsigned int));
-	*len = COEFF_RAM_SIZE;
-	value = buffer + 2 * sizeof(unsigned int);
+	mutex_lock(&tscs42xx->coeff_ram_lock);
 
-	mutex_lock(&tscs42xx->data_lock);
+	tscs42xx->coeff_ram_tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	tscs42xx->coeff_ram_tlv.len = COEFF_RAM_SIZE;
 
-	ret = enable_daccram_access(tscs42xx);
-	if (ret < 0)
-		goto early_exit_2;
-
-	for (i = 0, addr = 0; i < COEFF_RAM_SIZE; i += COEFF_SIZE, addr++) {
-		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set daccram address (%d)\n", ret);
-			goto exit;
-		}
-
-		ret = regmap_bulk_read(tscs42xx->regmap, R_DACCRRDL,
-			&value[i], COEFF_SIZE);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to read coefficient (%d)\n", ret);
-				goto exit;
-		}
-	}
-
-	ret = copy_to_user(bytes, buffer, size);
+	ret = copy_to_user(bytes, &tscs42xx->coeff_ram_tlv, size);
 	if (ret != 0) {
 		dev_err(codec->dev,
 			"Failed to copy %d bytes to user\n", ret);
@@ -392,13 +336,8 @@ static int coefficient_get(struct snd_kcontrol *kcontrol,
 
 	ret = 0;
 exit:
-	disable_daccram_access(tscs42xx);
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
 
-early_exit_2:
-	mutex_unlock(&tscs42xx->data_lock);
-	kfree(buffer);
-
-early_exit_1:
 	return ret;
 }
 
@@ -407,83 +346,63 @@ static int coefficient_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
-	unsigned int stat;
-	unsigned int tl_size = sizeof(unsigned int) * 2;
-	unsigned int c_size = size - tl_size - 1; /* Byte 0 is the address */
-	unsigned int c_count = c_size / COEFF_SIZE;
-	unsigned int i;
-	unsigned int cnt;
-	u8 *buffer;
-	u8 *c_bytes;
+	unsigned int coeff_size = size - TL_SIZE - V_ADDR_SIZE;
+	unsigned int coeff_cnt = coeff_size / COEFF_SIZE;
 	u8 addr;
 	int ret;
 
-	mutex_lock(&tscs42xx->data_lock);
-
-	ret = enable_daccram_access(tscs42xx);
-	if (ret < 0)
-		goto early_exit_1;
-
-	buffer = kzalloc(size, GFP_KERNEL);
-	if (!buffer) {
-		ret = -ENOMEM;
-		goto early_exit_2;
+	if (size < sizeof(unsigned int) * 2 + 1) {
+		dev_err(codec->dev,
+			"TLV is too small (%d)\n", -EINVAL);
+		return -EINVAL;
 	}
 
-	ret = copy_from_user(buffer, bytes, size);
+	ret = copy_from_user(&addr,
+		(u8 *)bytes + V_ADDR_OFFSET, sizeof(addr));
 	if (ret != 0) {
 		dev_err(codec->dev,
-			"Failed to copy %d bytes from user\n", ret);
-		ret = -EFAULT;
-		goto exit;
+			"Failed to copy bytes from user (%d)\n",
+			-EFAULT);
+		return -EFAULT;
 	}
 
-	c_bytes = buffer + tl_size + 1;
-
-	addr = buffer[tl_size];
-	if (addr + c_size / COEFF_SIZE > COEFF_MAX_ADDR) {
-		ret = -EINVAL;
+	if (addr + coeff_cnt > COEFF_COUNT) {
 		dev_err(codec->dev,
-			"DACCRM Address is out of range (%d)\n", ret);
-		goto exit;
+			"Coefficient write exceeds bounds (%d)\n", -ERANGE);
+		return -ERANGE;
 	}
 
-	for (i = 0, cnt = 0; cnt < c_count; i += COEFF_SIZE, cnt++, addr++) {
+	mutex_lock(&tscs42xx->coeff_ram_lock);
 
-		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
+	tscs42xx->coeff_ram_synced = false;
+	ret = copy_from_user(&tscs42xx->coeff_ram_tlv.val[addr * COEFF_SIZE],
+		(u8 *)bytes + V_COEFF_OFFSET, coeff_size);
+	if (ret != 0) {
+		dev_err(codec->dev,
+			"Failed to copy bytes from user (%d)\n",
+			-EFAULT);
+		ret = -EFAULT;
+		goto unlock_coeff_ram_exit;
+	}
+
+	mutex_lock(&tscs42xx->pll_lock);
+
+	if (plls_locked(codec)) {
+		ret = coefficient_ram_write(codec, addr, coeff_cnt);
 		if (ret < 0) {
 			dev_err(codec->dev,
-				"Failed to set daccram address (%d)\n", ret);
+				"Failed to flush coeff ram cache (%d)\n", ret);
 			goto exit;
 		}
-
-		ret = regmap_bulk_write(tscs42xx->regmap,
-			R_DACCRWRL, &c_bytes[i], COEFF_SIZE);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to write daccram (%d)\n", ret);
-			goto exit;
-		}
-
-		do {
-			ret = regmap_read(tscs42xx->regmap, R_DACCRSTAT, &stat);
-			if (ret < 0) {
-				dev_err(codec->dev,
-					"Failed to read daccrstat (%d)\n", ret);
-				goto exit;
-			}
-		} while (stat);
+		tscs42xx->coeff_ram_synced = true;
 	}
 
 	ret = 0;
 exit:
-	kfree(buffer);
+	mutex_unlock(&tscs42xx->pll_lock);
 
-early_exit_2:
-	disable_daccram_access(tscs42xx);
-
-early_exit_1:
-	mutex_unlock(&tscs42xx->data_lock);
+unlock_coeff_ram_exit:
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
 
 	return ret;
 }
@@ -797,6 +716,7 @@ static const struct soc_enum compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_CMPRAT, FB_CMPRAT,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
+
 static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Volumes */
 	SOC_DOUBLE_R_TLV("Headphone Playback Volume", R_HPVOLL, R_HPVOLR,
@@ -910,10 +830,9 @@ static int setup_sample_format(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int setup_sample_rate(struct snd_soc_codec *codec,
-		unsigned int rate,
-		struct tscs42xx_priv *tscs42xx)
+static int setup_sample_rate(struct snd_soc_codec *codec, unsigned int rate)
 {
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	unsigned int br, bm;
 	int ret;
 
@@ -985,7 +904,11 @@ static int setup_sample_rate(struct snd_soc_codec *codec,
 		return ret;
 	}
 
+	mutex_lock(&tscs42xx->audio_params_lock);
+
 	tscs42xx->samplerate = rate;
+
+	mutex_unlock(&tscs42xx->audio_params_lock);
 
 	return 0;
 }
@@ -1140,91 +1063,30 @@ static int set_pll_ctl_from_input_freq(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int configure_clocks(struct snd_soc_codec *codec,
-		struct tscs42xx_priv *tscs42xx)
-{
-	int ret;
-
-	ret = set_pll_ctl_from_input_freq(codec, tscs42xx->mclk_src_freq);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to setup PLL input (%d)\n", ret);
-		return ret;
-	}
-
-	switch (tscs42xx->pll_src_clk) {
-	case PLL_SRC_CLK_XTAL:
-		ret = snd_soc_write(codec, R_PLLREFSEL,
-				RV_PLLREFSEL_PLL1_REF_SEL_XTAL_MCLK1 |
-				RV_PLLREFSEL_PLL2_REF_SEL_XTAL_MCLK1);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set pll reference input (%d)\n",
-				ret);
-			return ret;
-		}
-		break;
-	case PLL_SRC_CLK_MCLK2:
-		ret = clk_set_rate(tscs42xx->mclk, tscs42xx->mclk_src_freq);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Could not set mclk rate %d (%d)\n",
-				tscs42xx->mclk_src_freq, ret);
-			return ret;
-		}
-
-		ret = clk_prepare_enable(tscs42xx->mclk);
-		if (ret < 0) {
-			dev_err(codec->dev, "Failed to enable mclk: (%d)\n",
-				ret);
-			return ret;
-		}
-
-		ret = snd_soc_write(codec, R_PLLREFSEL,
-				RV_PLLREFSEL_PLL1_REF_SEL_MCLK2 |
-				RV_PLLREFSEL_PLL2_REF_SEL_MCLK2);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set PLL reference (%d)\n", ret);
-			return ret;
-		}
-		break;
-	}
-
-	return 0;
-}
-
 static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params,
 		struct snd_soc_dai *codec_dai)
 {
 	struct snd_soc_codec *codec = codec_dai->codec;
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
-
-	mutex_lock(&tscs42xx->data_lock);
 
 	ret = setup_sample_format(codec, params_format(params));
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to setup sample format (%d)\n",
 			ret);
-		goto exit;
+		return ret;
 	}
 
-	ret = setup_sample_rate(codec, params_rate(params), tscs42xx);
+	ret = setup_sample_rate(codec, params_rate(params));
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to setup sample rate (%d)\n", ret);
-		goto exit;
+		return ret;
 	}
 
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->data_lock);
-
-	return ret;
+	return 0;
 }
 
-static int dac_mute(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int dac_mute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1236,7 +1098,7 @@ static int dac_mute(struct snd_soc_codec *codec,
 		return ret;
 	}
 
-	ret = power_down_audio_plls(codec, tscs42xx);
+	ret = power_down_audio_plls(codec);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to power down plls (%d)\n",
 			ret);
@@ -1246,12 +1108,11 @@ static int dac_mute(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int dac_unmute(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int dac_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
-	ret = power_up_audio_plls(codec, tscs42xx);
+	ret = power_up_audio_plls(codec);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to power up plls (%d)\n",
 			ret);
@@ -1261,7 +1122,7 @@ static int dac_unmute(struct snd_soc_codec *codec,
 	ret = snd_soc_update_bits(codec, R_CNVRTR1, RM_CNVRTR1_DACMU,
 		RV_CNVRTR1_DACMU_DISABLE);
 	if (ret < 0) {
-		power_down_audio_plls(codec, tscs42xx);
+		power_down_audio_plls(codec);
 		dev_err(codec->dev, "Failed to unmute DAC (%d)\n",
 				ret);
 		return ret;
@@ -1270,8 +1131,7 @@ static int dac_unmute(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int adc_mute(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int adc_mute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1283,7 +1143,7 @@ static int adc_mute(struct snd_soc_codec *codec,
 		return ret;
 	}
 
-	ret = power_down_audio_plls(codec, tscs42xx);
+	ret = power_down_audio_plls(codec);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to power down plls (%d)\n",
 			ret);
@@ -1293,12 +1153,11 @@ static int adc_mute(struct snd_soc_codec *codec,
 	return 0;
 }
 
-static int adc_unmute(struct snd_soc_codec *codec,
-	struct tscs42xx_priv *tscs42xx)
+static int adc_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
-	ret = power_up_audio_plls(codec, tscs42xx);
+	ret = power_up_audio_plls(codec);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to power up plls (%d)\n",
 			ret);
@@ -1308,7 +1167,7 @@ static int adc_unmute(struct snd_soc_codec *codec,
 	ret = snd_soc_update_bits(codec, R_CNVRTR0, RM_CNVRTR0_ADCMU,
 		RV_CNVRTR0_ADCMU_DISABLE);
 	if (ret < 0) {
-		power_down_audio_plls(codec, tscs42xx);
+		power_down_audio_plls(codec);
 		dev_err(codec->dev, "Failed to unmute ADC (%d)\n",
 				ret);
 		return ret;
@@ -1320,23 +1179,18 @@ static int adc_unmute(struct snd_soc_codec *codec,
 static int tscs42xx_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct snd_soc_codec *codec = dai->codec;
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
-
-	mutex_lock(&tscs42xx->data_lock);
 
 	if (mute)
 		if (stream == SNDRV_PCM_STREAM_PLAYBACK)
-			ret = dac_mute(codec, tscs42xx);
+			ret = dac_mute(codec);
 		else
-			ret = adc_mute(codec, tscs42xx);
+			ret = adc_mute(codec);
 	else
 		if (stream == SNDRV_PCM_STREAM_PLAYBACK)
-			ret = dac_unmute(codec, tscs42xx);
+			ret = dac_unmute(codec);
 		else
-			ret = adc_unmute(codec, tscs42xx);
-
-	mutex_unlock(&tscs42xx->data_lock);
+			ret = adc_unmute(codec);
 
 	return ret;
 }
@@ -1366,15 +1220,13 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	return ret;
 }
 
-static int tscs42xx_set_bclk_ratio(struct snd_soc_dai *codec_dai,
+static int tscs42xx_set_dai_bclk_ratio(struct snd_soc_dai *codec_dai,
 		unsigned int ratio)
 {
 	struct snd_soc_codec *codec = codec_dai->codec;
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	unsigned int value;
 	int ret = 0;
-
-	mutex_lock(&tscs42xx->data_lock);
 
 	switch (ratio) {
 	case 32:
@@ -1387,36 +1239,80 @@ static int tscs42xx_set_bclk_ratio(struct snd_soc_dai *codec_dai,
 		value = RV_DACSR_DBCM_64;
 		break;
 	default:
-		ret = -EINVAL;
 		dev_err(codec->dev, "Unsupported bclk ratio (%d)\n", ret);
-		goto exit;
+		return -EINVAL;
 	}
 
 	ret = snd_soc_update_bits(codec, R_DACSR, RM_DACSR_DBCM, value);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to set DAC BCLK ratio (%d)\n", ret);
-		goto exit;
+		return ret;
 	}
 	ret = snd_soc_update_bits(codec, R_ADCSR, RM_ADCSR_ABCM, value);
 	if (ret < 0) {
 		dev_err(codec->dev, "Failed to set ADC BCLK ratio (%d)\n", ret);
-		goto exit;
+		return ret;
 	}
+
+	mutex_lock(&tscs42xx->audio_params_lock);
 
 	tscs42xx->bclk_ratio = ratio;
 
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->data_lock);
+	mutex_unlock(&tscs42xx->audio_params_lock);
 
-	return ret;
+	return 0;
+}
+
+static int tscs42xx_set_dai_sysclk(struct snd_soc_dai *codec_dai,
+	int clk_id, unsigned int freq, int dir)
+{
+	struct snd_soc_codec *codec = codec_dai->codec;
+	int ret;
+
+	switch (clk_id) {
+	case TSCS42XX_PLL_SRC_XTAL:
+	case TSCS42XX_PLL_SRC_MCLK1:
+		ret = snd_soc_write(codec, R_PLLREFSEL,
+				RV_PLLREFSEL_PLL1_REF_SEL_XTAL_MCLK1 |
+				RV_PLLREFSEL_PLL2_REF_SEL_XTAL_MCLK1);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set pll reference input (%d)\n",
+				ret);
+			return ret;
+		}
+		break;
+	case TSCS42XX_PLL_SRC_MCLK2:
+		ret = snd_soc_write(codec, R_PLLREFSEL,
+				RV_PLLREFSEL_PLL1_REF_SEL_MCLK2 |
+				RV_PLLREFSEL_PLL2_REF_SEL_MCLK2);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set PLL reference (%d)\n", ret);
+			return ret;
+		}
+		break;
+	default:
+		dev_err(codec->dev, "pll src is unsupported\n");
+		return -EINVAL;
+	}
+
+	ret = set_pll_ctl_from_input_freq(codec, freq);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to setup PLL input freq (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 static const struct snd_soc_dai_ops tscs42xx_dai_ops = {
 	.hw_params	= tscs42xx_hw_params,
 	.mute_stream	= tscs42xx_mute_stream,
 	.set_fmt	= tscs42xx_set_dai_fmt,
-	.set_bclk_ratio = tscs42xx_set_bclk_ratio,
+	.set_bclk_ratio = tscs42xx_set_dai_bclk_ratio,
+	.set_sysclk	= tscs42xx_set_dai_sysclk,
 };
 
 static struct snd_soc_dai_driver tscs42xx_dai = {
@@ -1464,53 +1360,7 @@ static int part_is_valid(struct tscs42xx_priv *tscs42xx)
 		break;
 	};
 
-	if (ret)
-		dev_dbg(tscs42xx->dev, "Found part 0x%04x\n", val);
-	else
-		dev_err(tscs42xx->dev, "0x%04x is not a valid part\n", val);
-
 	return ret;
-}
-
-static int set_data_from_of(struct i2c_client *i2c,
-		struct tscs42xx_priv *tscs42xx)
-{
-	struct device_node *np = i2c->dev.of_node;
-	char const *mclk_src = NULL;
-	int ret;
-
-	ret = of_property_read_string(np, "mclk-src", &mclk_src);
-	if (ret) {
-		dev_err(&i2c->dev, "mclk-src is needed (%d)\n", ret);
-		return ret;
-	}
-
-	if (!strncmp(mclk_src, "mclk", 4)) {
-		tscs42xx->mclk = devm_clk_get(&i2c->dev, NULL);
-		if (IS_ERR(tscs42xx->mclk)) {
-			dev_dbg(&i2c->dev, "mclk not present trying again\n");
-			return -EPROBE_DEFER;
-		}
-		tscs42xx->pll_src_clk = PLL_SRC_CLK_MCLK2;
-	} else if (!strncmp(mclk_src, "xtal", 4)) {
-		tscs42xx->pll_src_clk = PLL_SRC_CLK_XTAL;
-	} else {
-		dev_err(&i2c->dev, "mclk-src %s is unsupported\n", mclk_src);
-		return -EINVAL;
-	}
-
-	ret = of_property_read_u32(np, "mclk-src-freq",
-			&tscs42xx->mclk_src_freq);
-	if (ret) {
-		dev_err(&i2c->dev, "mclk-src-freq not provided (%d)\n", ret);
-		return ret;
-	}
-	if (!get_pll_ctl(tscs42xx->mclk_src_freq)) {
-		dev_err(&i2c->dev, "mclk frequency unsupported\n");
-		return ret;
-	}
-
-	return 0;
 }
 
 //static struct tempo_control_reg control_regs[] = {
@@ -1573,65 +1423,19 @@ static int set_data_from_of(struct i2c_client *i2c,
 
 static int tscs42xx_probe(struct snd_soc_codec *codec)
 {
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int i;
 	int ret;
-
-	mutex_lock(&tscs42xx->data_lock);
-
-	tscs42xx->codec = codec;
-
-	ret = configure_clocks(codec, tscs42xx);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to configure clocks (%d)\n", ret);
-		goto exit;
-	}
 
 	for (i = 0; i < ARRAY_SIZE(r_inits); ++i) {
 		ret = snd_soc_write(codec, r_inits[i].reg, r_inits[i].def);
 		if (ret < 0) {
 			dev_err(codec->dev,
 				"Failed to write codec defaults (%d)\n", ret);
-			goto exit;
+			return ret;
 		}
 	}
 
-	/* Power up an interface so the daccram can be accessed */
-	ret = snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL,
-		RV_PWRM2_HPL_ENABLE);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to power up interface (%d)\n", ret);
-		goto exit;
-	}
-
-	/* PLLs also needed to be powered */
-	tscs42xx->samplerate = 48000; /* No valid rate exist yet */
-	ret = power_up_audio_plls(codec, tscs42xx);
-	if (ret < 0) {
-		goto exit;
-		snd_soc_update_bits(codec, R_PWRM2,
-					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
-	}
-
-	ret = load_dac_coefficient_ram(codec);
-	if (ret < 0) {
-		dev_dbg(codec->dev, "Failed to load DAC Coefficients (%d)\n",
-			ret);
-		power_down_audio_plls(codec, tscs42xx);
-		snd_soc_update_bits(codec, R_PWRM2,
-					RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
-		goto exit;
-	}
-
-	power_down_audio_plls(codec, tscs42xx);
-	snd_soc_update_bits(codec, R_PWRM2, RM_PWRM2_HPL, RV_PWRM2_HPL_DISABLE);
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->data_lock);
-
-	return ret;
+	return 0;
 }
 
 static int tscs42xx_remove(struct snd_soc_codec *codec)
@@ -1652,6 +1456,20 @@ static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
 	},
 };
 
+static void init_coeff_ram_defaults(struct tscs42xx_priv *tscs42xx)
+{
+	const u8 norms[] = { 0x00, 0x05, 0x0a, 0x0f, 0x14, 0x19, 0x1f, 0x20,
+		0x25, 0x2a, 0x2f, 0x34, 0x39, 0x3f, 0x40, 0x45, 0x4a, 0x4f,
+		0x54, 0x59, 0x5f, 0x60, 0x65, 0x6a, 0x6f, 0x74, 0x79, 0x7f,
+		0x80, 0x85, 0x8c, 0x91, 0x96, 0x97, 0x9c, 0xa3, 0xa8, 0xad,
+		0xaf, 0xb0, 0xb5, 0xba, 0xbf, 0xc4, 0xc9, };
+	u8 *coeff_ram = tscs42xx->coeff_ram_tlv.val;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(norms); i++)
+		coeff_ram[((norms[i] + 1) * COEFF_SIZE) - 1] = 0x40;
+}
+
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
@@ -1661,53 +1479,43 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);
 	if (!tscs42xx)
 		return -ENOMEM;
-	tscs42xx->dev = &i2c->dev;
 
-	mutex_init(&tscs42xx->data_lock);
-	mutex_lock(&tscs42xx->data_lock);
+	init_coeff_ram_defaults(tscs42xx);
 
-	tscs42xx->pll_users = 0;
-
-	ret = set_data_from_of(i2c, tscs42xx);
-	if (ret < 0) {
-		dev_err(&i2c->dev, "Error parsing device tree info (%d)", ret);
-		goto exit;
-	}
+	mutex_init(&tscs42xx->audio_params_lock);
+	mutex_init(&tscs42xx->coeff_ram_lock);
+	mutex_init(&tscs42xx->pll_lock);
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
 		ret = PTR_ERR(tscs42xx->regmap);
-		dev_err(&i2c->dev, "Failed to allocat regmap (%d)\n", ret);
-		goto exit;
+		dev_err(&i2c->dev, "Failed to allocate regmap (%d)\n", ret);
+		return ret;
 	}
+
+	i2c_set_clientdata(i2c, tscs42xx);
 
 	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
 		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
-		goto exit;
+		return ret;
 	}
 
 	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
 	if (ret < 0) {
 		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
-		goto exit;
+		return ret;
 	}
-
-	i2c_set_clientdata(i2c, tscs42xx);
 
 	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_tscs42xx,
 			&tscs42xx_dai, 1);
 	if (ret) {
 		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
-		goto exit;
+		return ret;
 	}
 
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->data_lock);
-
-	return ret;
+	return 0;
 }
 
 static int tscs42xx_i2c_remove(struct i2c_client *client)

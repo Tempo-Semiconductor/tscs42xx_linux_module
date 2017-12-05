@@ -52,6 +52,8 @@ struct tscs_priv {
 	struct snd_kcontrol *analog_mic_kctl;
 	//struct snd_kcontrol *line_in_kctl;
 	struct snd_soc_codec *codec;
+	int pll_src_id;
+	unsigned int pll_src_freq;
 };
 
 static struct snd_soc_jack hp_jack;
@@ -171,6 +173,7 @@ static int mic_jack_status_check(void *data)
 static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 {
 	int ret;
+	struct tscs_priv *tscs42xx = snd_soc_card_get_drvdata(rtd->card);
 
 	tempo_debug("");
 
@@ -183,6 +186,14 @@ static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 	ret = snd_soc_dai_set_bclk_ratio(rtd->cpu_dai, 64);
 	if (ret < 0) {
 		dev_err(rtd->codec->dev, "Failed to set the cpu dai bclk ratio");
+		return ret;
+	}
+
+	dev_info(rtd->codec->dev, "Setting sysclk\n");
+	ret = snd_soc_dai_set_sysclk(rtd->codec_dai, tscs42xx->pll_src_id,
+		tscs42xx->pll_src_freq, 0);
+	if (ret < 0) {
+		dev_err(rtd->codec->dev, "Failed to set sysclk (%d)\n", ret);
 		return ret;
 	}
 
@@ -231,6 +242,7 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 	struct snd_soc_dai_link *dai;
 	struct device_node *codec_of_node;
 	struct snd_soc_pcm_runtime *rtd;
+	char const *mclk_src = NULL;
 
 	tempo_debug("");
 
@@ -258,13 +270,39 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 	}
 
 	codec_of_node = of_parse_phandle(pdev->dev.of_node,
-			"audio-codec", 0);	
+			"audio-codec", 0);
 	if (codec_of_node)
 		dai->codec_of_node = codec_of_node;
 	else
 		dev_err(&pdev->dev,
 				"Failed to get codec_of_node");
 
+	/* Get Clocking Info */
+
+	ret = of_property_read_string(pdev->dev.of_node, "mclk-src", &mclk_src);
+	if (ret) {
+		dev_err(&pdev->dev, "mclk-src is needed (%d)\n", ret);
+		return ret;
+	}
+
+	if (!strncmp(mclk_src, "mclk", 4)) {
+		data->pll_src_id = TSCS42XX_PLL_SRC_MCLK2;
+	} else if (!strncmp(mclk_src, "xtal", 4)) {
+		data->pll_src_id = TSCS42XX_PLL_SRC_XTAL;
+	} else {
+		dev_err(&pdev->dev, "mclk-src %s is unsupported\n", mclk_src);
+		return -EINVAL;
+	}
+
+	ret = of_property_read_u32(pdev->dev.of_node, "mclk-src-freq",
+			&data->pll_src_freq);
+	if (ret) {
+		dev_err(&pdev->dev, "mclk-src-freq not provided (%d)\n", ret);
+		return ret;
+	}
+
+	/* End Clocking Info */
+	
 	ret = snd_soc_of_parse_audio_routing(&snd_rpi_tscs42xx, "audio-routing");
 	if (ret) {
 		dev_err(&pdev->dev, 
