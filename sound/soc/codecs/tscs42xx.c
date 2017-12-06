@@ -35,33 +35,41 @@
 #include "tscs42xx.h"
 
 #define COEFF_SIZE 3
-#define COEFF_MAX_ADDR 0xCD
-#define COEFF_COUNT (COEFF_MAX_ADDR + 1)
-#define COEFF_RAM_SIZE (COEFF_COUNT * COEFF_SIZE)
-#define COEFF_RAM_TLV_SIZE (COEFF_RAM_SIZE + 2 * sizeof(unsigned int))
+#define TL_SIZE (2 * sizeof(unsigned int))
+#define COEFF_TLV_SIZE (TL_SIZE + COEFF_SIZE)
+#define BIQUAD_COEFF_COUNT 5
+#define BIQUAD_SIZE (COEFF_SIZE * BIQUAD_COEFF_COUNT)
+#define BIQUAD_TLV_SIZE (TL_SIZE + BIQUAD_SIZE)
 
-struct coeff_ram_tlv {
+#define COEFF_RAM_MAX_ADDR 0xcd
+#define COEFF_RAM_COEFF_COUNT (COEFF_RAM_MAX_ADDR + 1)
+#define COEFF_RAM_SIZE (COEFF_SIZE * COEFF_RAM_COEFF_COUNT)
+
+#define DSP_TLV_MAX_VAL_SIZE BIQUAD_SIZE
+struct tscs_dsp_tlv {
 	unsigned int type;
 	unsigned int len;
-	u8 val[COEFF_RAM_SIZE];
+	u8 val[DSP_TLV_MAX_VAL_SIZE];
 };
 
-/*
- * Locking order is as it appears in the following struct.
- */
 struct tscs42xx_priv {
 
 	int bclk_ratio;
 	int samplerate;
 	struct mutex audio_params_lock;
 
-	struct coeff_ram_tlv coeff_ram_tlv;
+	u8 coeff_ram[COEFF_RAM_SIZE];
 	bool coeff_ram_synced;
 	struct mutex coeff_ram_lock;
 
 	struct mutex pll_lock;
 
 	struct regmap *regmap;
+};
+
+struct tscs_dsp_ctl {
+	struct soc_bytes_ext bytes_ext;
+	unsigned int addr;
 };
 
 static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
@@ -184,19 +192,15 @@ exit:
 	return ret;
 }
 
-/*
- * Call with coeff_ram_lock
- */
-static int coefficient_ram_write(struct snd_soc_codec *codec,
+static int coefficient_ram_write(struct snd_soc_codec *codec, u8 *coeff_ram,
 	unsigned int addr, unsigned int coeff_cnt)
 {
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int cnt;
 	int ret;
 
 	for (cnt = 0; cnt < coeff_cnt; cnt++, addr++) {
 
-		dev_info(codec->dev, "Writing addr (0x%x)\n", addr);
 		do {
 			ret = snd_soc_read(codec, R_DACCRSTAT);
 			if (ret < 0) {
@@ -214,7 +218,7 @@ static int coefficient_ram_write(struct snd_soc_codec *codec,
 		}
 
 		ret = regmap_bulk_write(tscs42xx->regmap, R_DACCRWRL,
-			&tscs42xx->coeff_ram_tlv.val[addr * COEFF_SIZE],
+			&coeff_ram[addr * COEFF_SIZE],
 			COEFF_SIZE);
 		if (ret < 0) {
 			dev_err(codec->dev,
@@ -234,7 +238,8 @@ static int coefficient_ram_sync(struct snd_soc_codec *codec)
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
 	if (tscs42xx->coeff_ram_synced == false) {
-		ret = coefficient_ram_write(codec, 0x00, COEFF_COUNT);
+		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram, 0x00,
+			COEFF_RAM_COEFF_COUNT);
 		if (ret < 0)
 			goto exit;
 		tscs42xx->coeff_ram_synced = true;
@@ -301,35 +306,28 @@ exit:
 	return ret;
 }
 
-#define TL_SIZE (sizeof(unsigned int) * 2)
-#define V_ADDR_SIZE sizeof(u8)
-#define V_ADDR_OFFSET TL_SIZE
-#define V_COEFF_OFFSET (TL_SIZE + V_ADDR_SIZE)
-static int coefficient_get(struct snd_kcontrol *kcontrol,
+static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
 	unsigned int __user *bytes, unsigned int size)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct tscs_dsp_tlv tlv;
+	unsigned int val_size = size - TL_SIZE;
 	int ret;
-
-	/* We must dump all the coefficients */
-	if (size != COEFF_RAM_TLV_SIZE) {
-		ret = -EINVAL;
-		dev_err(codec->dev,
-			"Cannot read %u bytes. Read must be %u bytes (%d)\n",
-			size, COEFF_RAM_SIZE, ret);
-		return -EINVAL;
-	}
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
-	tscs42xx->coeff_ram_tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
-	tscs42xx->coeff_ram_tlv.len = COEFF_RAM_SIZE;
+	tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	tlv.len = val_size;
 
-	ret = copy_to_user(bytes, &tscs42xx->coeff_ram_tlv, size);
+	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr], val_size);
+
+	ret = copy_to_user(bytes, &tlv, size);
 	if (ret != 0) {
 		dev_err(codec->dev,
-			"Failed to copy %d bytes to user\n", ret);
+			"Failed to copy tlv to user\n");
 		ret = -EFAULT;
 		goto exit;
 	}
@@ -341,54 +339,37 @@ exit:
 	return ret;
 }
 
-static int coefficient_put(struct snd_kcontrol *kcontrol,
+static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
 	const unsigned int __user *bytes, unsigned int size)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
-	unsigned int coeff_size = size - TL_SIZE - V_ADDR_SIZE;
-	unsigned int coeff_cnt = coeff_size / COEFF_SIZE;
-	u8 addr;
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	const unsigned int *val = bytes + 2; /* Jump over TL */
+	unsigned int val_size = size - TL_SIZE;
+	unsigned int coeff_cnt = val_size / COEFF_SIZE;
 	int ret;
-
-	if (size < sizeof(unsigned int) * 2 + 1) {
-		dev_err(codec->dev,
-			"TLV is too small (%d)\n", -EINVAL);
-		return -EINVAL;
-	}
-
-	ret = copy_from_user(&addr,
-		(u8 *)bytes + V_ADDR_OFFSET, sizeof(addr));
-	if (ret != 0) {
-		dev_err(codec->dev,
-			"Failed to copy bytes from user (%d)\n",
-			-EFAULT);
-		return -EFAULT;
-	}
-
-	if (addr + coeff_cnt > COEFF_COUNT) {
-		dev_err(codec->dev,
-			"Coefficient write exceeds bounds (%d)\n", -ERANGE);
-		return -ERANGE;
-	}
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
 	tscs42xx->coeff_ram_synced = false;
-	ret = copy_from_user(&tscs42xx->coeff_ram_tlv.val[addr * COEFF_SIZE],
-		(u8 *)bytes + V_COEFF_OFFSET, coeff_size);
+
+	ret = copy_from_user(&tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE],
+		val, val_size);
 	if (ret != 0) {
-		dev_err(codec->dev,
-			"Failed to copy bytes from user (%d)\n",
-			-EFAULT);
 		ret = -EFAULT;
+		dev_err(codec->dev,
+			"Failed to copy biquad values from user (%d)\n",
+			ret);
 		goto unlock_coeff_ram_exit;
 	}
 
 	mutex_lock(&tscs42xx->pll_lock);
 
 	if (plls_locked(codec)) {
-		ret = coefficient_ram_write(codec, addr, coeff_cnt);
+		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram,
+			ctl->addr, coeff_cnt);
 		if (ret < 0) {
 			dev_err(codec->dev,
 				"Failed to flush coeff ram cache (%d)\n", ret);
@@ -716,6 +697,15 @@ static const struct soc_enum compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_CMPRAT, FB_CMPRAT,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
+#define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE | \
+		  SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK, \
+	.tlv.c = (snd_soc_bytes_tlv_callback), \
+	.info = snd_soc_bytes_info_ext, \
+	.private_value = (unsigned long)&(struct tscs_dsp_ctl) \
+		{ {.max = xcount, .get = xhandler_get, .put = xhandler_put, }, \
+			.addr = xaddr, } }
 
 static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Volumes */
@@ -739,8 +729,35 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_ENUM("Input Channel Map Switch", ch_map_select_enum),
 
 	/* DSP */
-	SND_SOC_BYTES_TLV("Coefficients", COEFF_RAM_TLV_SIZE,
-		coefficient_get, coefficient_put),
+	TSCS_DSP_CTL("Cascade1L BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x00),
+	TSCS_DSP_CTL("Cascade1L BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x05),
+	TSCS_DSP_CTL("Cascade1L BiQuad3", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x0a),
+	TSCS_DSP_CTL("Cascade1L BiQuad4", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x0f),
+	TSCS_DSP_CTL("Cascade1L BiQuad5", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x14),
+	TSCS_DSP_CTL("Cascade1L BiQuad6", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x19),
+	TSCS_DSP_CTL("Cascade1R BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x20),
+	TSCS_DSP_CTL("Cascade1R BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x25),
+	TSCS_DSP_CTL("Cascade1R BiQuad3", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x2a),
+	TSCS_DSP_CTL("Cascade1R BiQuad4", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x2f),
+	TSCS_DSP_CTL("Cascade1R BiQuad5", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x34),
+	TSCS_DSP_CTL("Cascade1R BiQuad6", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x39),
+	TSCS_DSP_CTL("Cascade1L Prescale", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x1f),
+	TSCS_DSP_CTL("Cascade1R Prescale", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x3f),
+	TSCS_DSP_CTL("3D", COEFF_TLV_SIZE, tscs_dsp_get, tscs_dsp_put, 0xae),
 
 	/* EQ */
 	SOC_SINGLE("EQ1 Switch", R_CONFIG1, FB_CONFIG1_EQ1_EN, 1, 0),
@@ -1463,7 +1480,7 @@ static void init_coeff_ram_defaults(struct tscs42xx_priv *tscs42xx)
 		0x54, 0x59, 0x5f, 0x60, 0x65, 0x6a, 0x6f, 0x74, 0x79, 0x7f,
 		0x80, 0x85, 0x8c, 0x91, 0x96, 0x97, 0x9c, 0xa3, 0xa8, 0xad,
 		0xaf, 0xb0, 0xb5, 0xba, 0xbf, 0xc4, 0xc9, };
-	u8 *coeff_ram = tscs42xx->coeff_ram_tlv.val;
+	u8 *coeff_ram = tscs42xx->coeff_ram;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(norms); i++)
