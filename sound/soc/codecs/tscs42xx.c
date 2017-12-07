@@ -34,6 +34,8 @@
 
 #include "tscs42xx.h"
 
+#define USE_BYTES_EXT
+
 #define COEFF_SIZE 3
 #define TL_SIZE (2 * sizeof(unsigned int))
 #define COEFF_TLV_SIZE (TL_SIZE + COEFF_SIZE)
@@ -306,6 +308,92 @@ exit:
 	return ret;
 }
 
+#ifdef USE_BYTES_EXT
+static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct tscs_dsp_tlv tlv;
+	unsigned int val_size = params->max - TL_SIZE;
+
+	switch (val_size) {
+	case COEFF_SIZE:
+	case BIQUAD_SIZE:
+		break;
+	default:
+		dev_err(codec->dev, "Unsupported size %u\n", val_size);
+		return -EINVAL;
+	}
+
+	mutex_lock(&tscs42xx->coeff_ram_lock);
+
+	tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	tlv.len = val_size;
+
+	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE], val_size);
+
+	memcpy(ucontrol->value.bytes.data, &tlv, sizeof(tlv));
+
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
+
+	return 0;
+}
+
+static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	unsigned char *val = ucontrol->value.bytes.data + TL_SIZE;
+	unsigned int val_size = params->max - TL_SIZE;
+	unsigned int coeff_cnt = val_size / COEFF_SIZE;
+	int ret;
+
+	switch (val_size) {
+	case COEFF_SIZE:
+	case BIQUAD_SIZE:
+		break;
+	default:
+		dev_err(codec->dev, "Unsupported size %u\n", val_size);
+		return -EINVAL;
+	}
+
+	mutex_lock(&tscs42xx->coeff_ram_lock);
+
+	tscs42xx->coeff_ram_synced = false;
+
+	memcpy(&tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE],
+		val, val_size);
+
+	mutex_lock(&tscs42xx->pll_lock);
+
+	if (plls_locked(codec)) {
+		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram,
+			ctl->addr, coeff_cnt);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to flush coeff ram cache (%d)\n", ret);
+			goto exit;
+		}
+		tscs42xx->coeff_ram_synced = true;
+	}
+
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->pll_lock);
+
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
+
+	return ret;
+}
+#else
 static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
 	unsigned int __user *bytes, unsigned int size)
 {
@@ -322,7 +410,7 @@ static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
 	tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
 	tlv.len = val_size;
 
-	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr], val_size);
+	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE], val_size);
 
 	ret = copy_to_user(bytes, &tlv, size);
 	if (ret != 0) {
@@ -387,6 +475,7 @@ unlock_coeff_ram_exit:
 
 	return ret;
 }
+#endif // USE_BYTES_EXT
 
 static int compressor_attack_time_get(struct snd_kcontrol *kcontrol,
 	unsigned int __user *bytes, unsigned int size)
@@ -697,6 +786,15 @@ static const struct soc_enum compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_CMPRAT, FB_CMPRAT,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
+#ifdef USE_BYTES_EXT
+#define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.info = snd_soc_bytes_info_ext, \
+	.get = xhandler_get, .put = xhandler_put, \
+	.private_value = (unsigned long)&(struct tscs_dsp_ctl) \
+		{ {.max = xcount, }, \
+			.addr = xaddr, } }
+#else
 #define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
 	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE | \
@@ -706,6 +804,7 @@ static const struct soc_enum compressor_ratio_enum =
 	.private_value = (unsigned long)&(struct tscs_dsp_ctl) \
 		{ {.max = xcount, .get = xhandler_get, .put = xhandler_put, }, \
 			.addr = xaddr, } }
+#endif
 
 static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Volumes */
