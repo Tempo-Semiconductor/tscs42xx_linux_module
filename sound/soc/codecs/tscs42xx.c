@@ -840,6 +840,7 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 		tscs_dsp_get, tscs_dsp_put, 0x14),
 	TSCS_DSP_CTL("Cascade1L BiQuad6", BIQUAD_TLV_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x19),
+
 	TSCS_DSP_CTL("Cascade1R BiQuad1", BIQUAD_TLV_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x20),
 	TSCS_DSP_CTL("Cascade1R BiQuad2", BIQUAD_TLV_SIZE,
@@ -852,11 +853,101 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 		tscs_dsp_get, tscs_dsp_put, 0x34),
 	TSCS_DSP_CTL("Cascade1R BiQuad6", BIQUAD_TLV_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x39),
+
 	TSCS_DSP_CTL("Cascade1L Prescale", COEFF_TLV_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x1f),
 	TSCS_DSP_CTL("Cascade1R Prescale", COEFF_TLV_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x3f),
-	TSCS_DSP_CTL("3D", COEFF_TLV_SIZE, tscs_dsp_get, tscs_dsp_put, 0xae),
+
+	TSCS_DSP_CTL("Cascade2L BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x40),
+	TSCS_DSP_CTL("Cascade2L BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x45),
+	TSCS_DSP_CTL("Cascade2L BiQuad3", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x4a),
+	TSCS_DSP_CTL("Cascade2L BiQuad4", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x4f),
+	TSCS_DSP_CTL("Cascade2L BiQuad5", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x54),
+	TSCS_DSP_CTL("Cascade2L BiQuad6", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x59),
+
+	TSCS_DSP_CTL("Cascade2R BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x60),
+	TSCS_DSP_CTL("Cascade2R BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x65),
+	TSCS_DSP_CTL("Cascade2R BiQuad3", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x6a),
+	TSCS_DSP_CTL("Cascade2R BiQuad4", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x6f),
+	TSCS_DSP_CTL("Cascade2R BiQuad5", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x74),
+	TSCS_DSP_CTL("Cascade2R BiQuad6", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x79),
+
+	TSCS_DSP_CTL("Cascade2L Prescale", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x5f),
+	TSCS_DSP_CTL("Cascade2R Prescale", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x7f),
+
+	TSCS_DSP_CTL("Bass Extraction BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x80),
+	TSCS_DSP_CTL("Bass Extraction BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x85),
+
+	TSCS_DSP_CTL("Bass Non Linear Function 1", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x8a),
+	TSCS_DSP_CTL("Bass Non Linear Function 2", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x8b),
+
+	TSCS_DSP_CTL("Bass Limiter BiQuad", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x8c),
+
+	TSCS_DSP_CTL("Bass Cut Off BiQuad", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x91),
+
+	TSCS_DSP_CTL("Bass Mix", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x96),
+
+	TSCS_DSP_CTL("Treb Extraction BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x97),
+	TSCS_DSP_CTL("Treb Extraction BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0x9c),
+
+	TSCS_DSP_CTL("Treb Non Linear Function 1", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xa1),
+	TSCS_DSP_CTL("Treb Non Linear Function 2", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xa2),
+
+	TSCS_DSP_CTL("Treb Limiter BiQuad", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xa3),
+
+	TSCS_DSP_CTL("Treb Cut Off BiQuad", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xa8),
+
+	TSCS_DSP_CTL("Treb Mix", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xad),
+
+	TSCS_DSP_CTL("3D", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xae),
+
+	TSCS_DSP_CTL("3D Mix", COEFF_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xaf),
+
+	TSCS_DSP_CTL("MBC1 BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xb0),
+	TSCS_DSP_CTL("MBC1 BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xb5),
+
+	TSCS_DSP_CTL("MBC2 BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xba),
+	TSCS_DSP_CTL("MBC2 BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xbf),
+
+	TSCS_DSP_CTL("MBC3 BiQuad1", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xc4),
+	TSCS_DSP_CTL("MBC3 BiQuad2", BIQUAD_TLV_SIZE,
+		tscs_dsp_get, tscs_dsp_put, 0xc9),
 
 	/* EQ */
 	SOC_SINGLE("EQ1 Switch", R_CONFIG1, FB_CONFIG1_EQ1_EN, 1, 0),
