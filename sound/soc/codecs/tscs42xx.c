@@ -477,89 +477,6 @@ unlock_coeff_ram_exit:
 }
 #endif // USE_BYTES_EXT
 
-static int compressor_attack_time_get(struct snd_kcontrol *kcontrol,
-	unsigned int __user *bytes, unsigned int size)
-{
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
-	unsigned int low;
-	unsigned int hi;
-	u16 buffer;
-	int ret;
-
-	if (size != sizeof(u16)) {
-		dev_err(codec->dev,
-			"Compressor attack is %u bytes (%d)\n",
-			sizeof(u16), -EINVAL);
-		return -EINVAL;
-	}
-
-	ret = regmap_read(tscs42xx->regmap, R_CATKTCL, &low);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to read compressor attack (%d)\n", ret);
-		return ret;
-	}
-	ret = regmap_read(tscs42xx->regmap, R_CATKTCH, &hi);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to read compressor attack (%d)\n", ret);
-		return ret;
-	}
-	buffer = hi << 8 | low;
-
-	ret = copy_to_user(bytes, &buffer, size);
-	if (ret != 0) {
-		dev_err(codec->dev,
-			"Failed to copy %d bytes to user\n", ret);
-		return -EFAULT;
-	}
-
-	return 0;
-}
-
-static int compressor_attack_time_put(struct snd_kcontrol *kcontrol,
-	const unsigned int __user *bytes, unsigned int size)
-{
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = dev_get_drvdata(codec->dev);
-	u16 buffer;
-	unsigned int byte;
-	int ret;
-
-	if (size != sizeof(u16)) {
-		dev_err(codec->dev,
-			"Compressor attack is %u bytes (%d)\n",
-			sizeof(u16), -EINVAL);
-		return -EINVAL;
-	}
-
-	ret = copy_from_user(&buffer, bytes, size);
-	if (ret != 0) {
-		dev_err(codec->dev,
-			"Failed to copy %d bytes from user\n", ret);
-		return -EFAULT;
-	}
-
-	byte = buffer & 0xff;
-	ret = regmap_write(tscs42xx->regmap, R_CATKTCL, byte);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to write compressor attack (%d)\n", ret);
-		return ret;
-	}
-
-	byte = buffer >> 8 & 0xff;
-	ret = regmap_write(tscs42xx->regmap, R_CATKTCH, byte);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to write compressor attack (%d)\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 /* D2S Input Select */
 static char const * const d2s_input_select_text[] = {
 	"Line 1", "Line 2"
@@ -786,6 +703,18 @@ static const struct soc_enum compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_CMPRAT, FB_CMPRAT,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
+static const struct soc_enum dac_mbc1_compressor_ratio_enum =
+	SOC_ENUM_SINGLE(R_DACMBCRAT1, FB_DACMBCRAT1_RATIO,
+		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
+
+static const struct soc_enum dac_mbc2_compressor_ratio_enum =
+	SOC_ENUM_SINGLE(R_DACMBCRAT2, FB_DACMBCRAT2_RATIO,
+		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
+
+static const struct soc_enum dac_mbc3_compressor_ratio_enum =
+	SOC_ENUM_SINGLE(R_DACMBCRAT3, FB_DACMBCRAT3_RATIO,
+		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
+
 #ifdef USE_BYTES_EXT
 #define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
@@ -971,8 +900,7 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_SINGLE_TLV("Compressor Threshold Playback Volume",
 		R_COMPTH, FB_COMPTH, 0xff, 0, compth_scale),
 	SOC_ENUM("Compressor Ratio", compressor_ratio_enum),
-	SND_SOC_BYTES_TLV("Compressor Attack Time", sizeof(u16),
-		compressor_attack_time_get, compressor_attack_time_put),
+	SND_SOC_BYTES("Compressor Attack Time", R_CATKTCL, 2),
 
 	/* Effects */
 	SOC_SINGLE("3D Switch", R_FXCTL, FB_FXCTL_3DEN, 1, 0),
@@ -997,6 +925,43 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 		mbc_level_detection_window_enums[1]),
 	SOC_ENUM("MBC Band3 Level Detection Window Switch",
 		mbc_level_detection_window_enums[2]),
+
+	SOC_SINGLE("MBC1 Phase Invert", R_DACMBCMUG1, FB_DACMBCMUG1_PHASE,
+		1, 0),
+	SOC_SINGLE_TLV("DAC MBC1 Make-Up Gain Playback Volume",
+		R_DACMBCMUG1, FB_DACMBCMUG1_MUGAIN, 0x1f, 0, mugain_scale),
+	SOC_SINGLE_TLV("DAC MBC1 Compressor Threshold Playback Volume",
+		R_DACMBCTHR1, FB_DACMBCTHR1_THRESH, 0xff, 0, compth_scale),
+	SOC_ENUM("DAC MBC1 Compressor Ratio",
+		dac_mbc1_compressor_ratio_enum),
+	SND_SOC_BYTES("DAC MBC1 Compressor Attack Time", R_DACMBCATK1L, 2),
+	SND_SOC_BYTES("DAC MBC1 Compressor Release Time Constant",
+		R_DACMBCREL1L, 2),
+
+	SOC_SINGLE("MBC2 Phase Invert", R_DACMBCMUG2, FB_DACMBCMUG2_PHASE,
+		1, 0),
+	SOC_SINGLE_TLV("DAC MBC2 Make-Up Gain Playback Volume",
+		R_DACMBCMUG2, FB_DACMBCMUG2_MUGAIN, 0x1f, 0, mugain_scale),
+	SOC_SINGLE_TLV("DAC MBC2 Compressor Threshold Playback Volume",
+		R_DACMBCTHR2, FB_DACMBCTHR2_THRESH, 0xff, 0, compth_scale),
+	SOC_ENUM("DAC MBC2 Compressor Ratio",
+		dac_mbc2_compressor_ratio_enum),
+	SND_SOC_BYTES("DAC MBC2 Compressor Attack Time", R_DACMBCATK2L, 2),
+	SND_SOC_BYTES("DAC MBC2 Compressor Release Time Constant",
+		R_DACMBCREL2L, 2),
+
+	SOC_SINGLE("MBC3 Phase Invert", R_DACMBCMUG3, FB_DACMBCMUG3_PHASE,
+		1, 0),
+	SOC_SINGLE_TLV("DAC MBC3 Make-Up Gain Playback Volume",
+		R_DACMBCMUG3, FB_DACMBCMUG3_MUGAIN, 0x1f, 0, mugain_scale),
+	SOC_SINGLE_TLV("DAC MBC3 Compressor Threshold Playback Volume",
+		R_DACMBCTHR3, FB_DACMBCTHR3_THRESH, 0xff, 0, compth_scale),
+	SOC_ENUM("DAC MBC3 Compressor Ratio",
+		dac_mbc3_compressor_ratio_enum),
+	SND_SOC_BYTES("DAC MBC3 Compressor Attack Time", R_DACMBCATK3L, 2),
+	SND_SOC_BYTES("DAC MBC3 Compressor Release Time Constant",
+		R_DACMBCREL3L, 2),
+
 };
 
 #define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
@@ -1569,64 +1534,6 @@ static int part_is_valid(struct tscs42xx_priv *tscs42xx)
 
 	return ret;
 }
-
-//static struct tempo_control_reg control_regs[] = {
-//	TEMPO_CONTROL_REG(config0, R_CONFIG0),		/* 0x1F */
-//	TEMPO_CONTROL_REG(config1, R_CONFIG1),		/* 0x20 */
-//	TEMPO_CONTROL_REG(clectl, R_CLECTL),		/* 0x25 */
-//	TEMPO_CONTROL_REG(mugain, R_MUGAIN),		/* 0x26 */
-//	TEMPO_CONTROL_REG(compth, R_COMPTH),		/* 0x27 */
-//	TEMPO_CONTROL_REG(cmprat, R_CMPRAT),		/* 0x28 */
-//	TEMPO_CONTROL_REG(catktcl, R_CATKTCL),		/* 0x29 */
-//	TEMPO_CONTROL_REG(catktch, R_CATKTCH),		/* 0x2A */
-//	TEMPO_CONTROL_REG(creltcl, R_CRELTCL),		/* 0x2B */
-//	TEMPO_CONTROL_REG(creltch, R_CRELTCH),		/* 0x2C */
-//	TEMPO_CONTROL_REG(limth, R_LIMTH),		/* 0x2D */
-//	TEMPO_CONTROL_REG(limtgt, R_LIMTGT),		/* 0x2E */
-//	TEMPO_CONTROL_REG(latktcl, R_LATKTCL),		/* 0x2F */
-//	TEMPO_CONTROL_REG(latktch, R_LATKTCH),		/* 0x30 */
-//	TEMPO_CONTROL_REG(lreltcl, R_LRELTCL),		/* 0x31 */
-//	TEMPO_CONTROL_REG(lreltch, R_LRELTCH),		/* 0x32 */
-//	TEMPO_CONTROL_REG(expth, R_EXPTH),		/* 0x33 */
-//	TEMPO_CONTROL_REG(exprat, R_EXPRAT),		/* 0x34 */
-//	TEMPO_CONTROL_REG(xatktcl, R_XATKTCL),		/* 0x35 */
-//	TEMPO_CONTROL_REG(xatktch, R_XATKTCH),		/* 0x36 */
-//	TEMPO_CONTROL_REG(xreltcl, R_XRELTCL),		/* 0x37 */
-//	TEMPO_CONTROL_REG(xreltch, R_XRELTCH),		/* 0x38 */
-//	TEMPO_CONTROL_REG(fxctl, R_FXCTL),		/* 0x39 */
-//	TEMPO_CONTROL_REG(daccrwrl, R_DACCRWRL),	/* 0x3A */
-//	TEMPO_CONTROL_REG(daccrwrm, R_DACCRWRM),	/* 0x3B */
-//	TEMPO_CONTROL_REG(daccrwrh, R_DACCRWRH),	/* 0x3C */
-//	TEMPO_CONTROL_REG(daccrrdl, R_DACCRRDL),	/* 0x3D */
-//	TEMPO_CONTROL_REG(daccrrdm, R_DACCRRDM),	/* 0x3E */
-//	TEMPO_CONTROL_REG(daccrrdh, R_DACCRRDH),	/* 0x3F */
-//	TEMPO_CONTROL_REG(daccraddr, R_DACCRADDR),	/* 0x40 */
-//	TEMPO_CONTROL_REG(dcofsel, R_DCOFSEL),		/* 0x41 */
-//	TEMPO_CONTROL_REG(daccrstat, R_DACCRSTAT),	/* 0x8A */
-//	TEMPO_CONTROL_REG(dacmbcen, R_DACMBCEN),	/* 0xC7 */
-//	TEMPO_CONTROL_REG(dacmbcctl, R_DACMBCCTL),	/* 0xC8 */
-//	TEMPO_CONTROL_REG(dacmbcmug1, R_DACMBCMUG1),	/* 0xC9 */
-//	TEMPO_CONTROL_REG(dacmbcthr1, R_DACMBCTHR1),	/* 0xCA */
-//	TEMPO_CONTROL_REG(dacmbcrat1, R_DACMBCRAT1),	/* 0xCB */
-//	TEMPO_CONTROL_REG(dacmbcatk1l, R_DACMBCATK1L),	/* 0xCC */
-//	TEMPO_CONTROL_REG(dacmbcatk1h, R_DACMBCATK1H),	/* 0xCD */
-//	TEMPO_CONTROL_REG(dacmbcrel1l, R_DACMBCREL1L),	/* 0xCE */
-//	TEMPO_CONTROL_REG(dacmbcrel1h, R_DACMBCREL1H),	/* 0xCF */
-//	TEMPO_CONTROL_REG(dacmbcmug2, R_DACMBCMUG2),	/* 0xD0 */
-//	TEMPO_CONTROL_REG(dacmbcthr2, R_DACMBCTHR2),	/* 0xD1 */
-//	TEMPO_CONTROL_REG(dacmbcrat2, R_DACMBCRAT2),	/* 0xD2 */
-//	TEMPO_CONTROL_REG(dacmbcatk2l, R_DACMBCATK2L),	/* 0xD3 */
-//	TEMPO_CONTROL_REG(dacmbcatk2h, R_DACMBCATK2H),	/* 0xD4 */
-//	TEMPO_CONTROL_REG(dacmbcrel2l, R_DACMBCREL2L),	/* 0xD5 */
-//	TEMPO_CONTROL_REG(dacmbcrel2h, R_DACMBCREL2H),	/* 0xD6 */
-//	TEMPO_CONTROL_REG(dacmbcmug3, R_DACMBCMUG3),	/* 0xD7 */
-//	TEMPO_CONTROL_REG(dacmbcthr3, R_DACMBCTHR3),	/* 0xD8 */
-//	TEMPO_CONTROL_REG(dacmbcrat3, R_DACMBCRAT3),	/* 0xD9 */
-//	TEMPO_CONTROL_REG(dacmbcatk3l, R_DACMBCATK3L),	/* 0xDA */
-//	TEMPO_CONTROL_REG(dacmbcatk3h, R_DACMBCATK3H),	/* 0xDB */
-//	TEMPO_CONTROL_REG(dacmbcrel3l, R_DACMBCREL3L),	/* 0xDC */
-//	TEMPO_CONTROL_REG(dacmbcrel3h, R_DACMBCREL3H),	/* 0xDD */
-//};
 
 static int tscs42xx_probe(struct snd_soc_codec *codec)
 {
