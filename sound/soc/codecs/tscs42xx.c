@@ -1,58 +1,25 @@
-/*
- * tscs42xx.c -- TSCS42xx ALSA SoC Audio driver
- *
- * Copyright 2017 Tempo Semiconductor, Inc.
- *
- * Author: Steven Eckhoff <steven.eckhoff.opensource@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+// tscs42xx.c -- TSCS42xx ALSA SoC Audio driver
+// Copyright 2017 Tempo Semiconductor, Inc.
+// Author: Steven Eckhoff <steven.eckhoff.opensource@gmail.com>
 
-#include <linux/moduleparam.h>
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/delay.h>
-#include <linux/pm.h>
 #include <linux/i2c.h>
-#include <linux/slab.h>
-#include <linux/regmap.h>
-#include <linux/regulator/consumer.h>
-#include <linux/spi/spi.h>
-#include <linux/of_device.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/clk.h>
-#include <sound/core.h>
-#include <sound/pcm.h>
+#include <linux/regmap.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
-#include <sound/initval.h>
 #include <sound/tlv.h>
-#include <linux/firmware.h>
-#include <linux/sysfs.h>
 
 #include "tscs42xx.h"
 
-#define USE_BYTES_EXT
-
 #define COEFF_SIZE 3
-#define TL_SIZE (2 * sizeof(unsigned int))
-#define COEFF_TLV_SIZE (TL_SIZE + COEFF_SIZE)
 #define BIQUAD_COEFF_COUNT 5
 #define BIQUAD_SIZE (COEFF_SIZE * BIQUAD_COEFF_COUNT)
-#define BIQUAD_TLV_SIZE (TL_SIZE + BIQUAD_SIZE)
 
 #define COEFF_RAM_MAX_ADDR 0xcd
 #define COEFF_RAM_COEFF_COUNT (COEFF_RAM_MAX_ADDR + 1)
 #define COEFF_RAM_SIZE (COEFF_SIZE * COEFF_RAM_COEFF_COUNT)
-
-#define DSP_TLV_MAX_VAL_SIZE BIQUAD_SIZE
-struct tscs_dsp_tlv {
-	unsigned int type;
-	unsigned int len;
-	u8 val[DSP_TLV_MAX_VAL_SIZE];
-};
 
 struct tscs42xx_priv {
 
@@ -70,8 +37,8 @@ struct tscs42xx_priv {
 };
 
 struct tscs_dsp_ctl {
-	struct soc_bytes_ext bytes_ext;
 	unsigned int addr;
+	struct soc_bytes_ext bytes_ext;
 };
 
 static bool tscs42xx_volatile(struct device *dev, unsigned int reg)
@@ -308,35 +275,19 @@ exit:
 	return ret;
 }
 
-#ifdef USE_BYTES_EXT
 static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
 	struct tscs_dsp_ctl *ctl =
 		(struct tscs_dsp_ctl *)kcontrol->private_value;
-	struct tscs_dsp_tlv tlv;
-	unsigned int val_size = params->max - TL_SIZE;
-
-	switch (val_size) {
-	case COEFF_SIZE:
-	case BIQUAD_SIZE:
-		break;
-	default:
-		dev_err(codec->dev, "Unsupported size %u\n", val_size);
-		return -EINVAL;
-	}
+	struct soc_bytes_ext *params = &ctl->bytes_ext;
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
-	tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
-	tlv.len = val_size;
-
-	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE], val_size);
-
-	memcpy(ucontrol->value.bytes.data, &tlv, sizeof(tlv));
+	memcpy(ucontrol->value.bytes.data,
+		&tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE], params->max);
 
 	mutex_unlock(&tscs42xx->coeff_ram_lock);
 
@@ -348,29 +299,18 @@ static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
 	struct tscs_dsp_ctl *ctl =
 		(struct tscs_dsp_ctl *)kcontrol->private_value;
-	unsigned char *val = ucontrol->value.bytes.data + TL_SIZE;
-	unsigned int val_size = params->max - TL_SIZE;
-	unsigned int coeff_cnt = val_size / COEFF_SIZE;
+	struct soc_bytes_ext *params = &ctl->bytes_ext;
+	unsigned int coeff_cnt = params->max / COEFF_SIZE;
 	int ret;
-
-	switch (val_size) {
-	case COEFF_SIZE:
-	case BIQUAD_SIZE:
-		break;
-	default:
-		dev_err(codec->dev, "Unsupported size %u\n", val_size);
-		return -EINVAL;
-	}
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
 	tscs42xx->coeff_ram_synced = false;
 
 	memcpy(&tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE],
-		val, val_size);
+		ucontrol->value.bytes.data, params->max);
 
 	mutex_lock(&tscs42xx->pll_lock);
 
@@ -393,89 +333,6 @@ exit:
 
 	return ret;
 }
-#else
-static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
-	unsigned int __user *bytes, unsigned int size)
-{
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
-	struct tscs_dsp_tlv tlv;
-	unsigned int val_size = size - TL_SIZE;
-	int ret;
-
-	mutex_lock(&tscs42xx->coeff_ram_lock);
-
-	tlv.type = SNDRV_CTL_ELEM_TYPE_BYTES;
-	tlv.len = val_size;
-
-	memcpy(tlv.val, &tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE], val_size);
-
-	ret = copy_to_user(bytes, &tlv, size);
-	if (ret != 0) {
-		dev_err(codec->dev,
-			"Failed to copy tlv to user\n");
-		ret = -EFAULT;
-		goto exit;
-	}
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->coeff_ram_lock);
-
-	return ret;
-}
-
-static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
-	const unsigned int __user *bytes, unsigned int size)
-{
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
-	const unsigned int *val = bytes + 2; /* Jump over TL */
-	unsigned int val_size = size - TL_SIZE;
-	unsigned int coeff_cnt = val_size / COEFF_SIZE;
-	int ret;
-
-	mutex_lock(&tscs42xx->coeff_ram_lock);
-
-	tscs42xx->coeff_ram_synced = false;
-
-	ret = copy_from_user(&tscs42xx->coeff_ram[ctl->addr * COEFF_SIZE],
-		val, val_size);
-	if (ret != 0) {
-		ret = -EFAULT;
-		dev_err(codec->dev,
-			"Failed to copy biquad values from user (%d)\n",
-			ret);
-		goto unlock_coeff_ram_exit;
-	}
-
-	mutex_lock(&tscs42xx->pll_lock);
-
-	if (plls_locked(codec)) {
-		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram,
-			ctl->addr, coeff_cnt);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to flush coeff ram cache (%d)\n", ret);
-			goto exit;
-		}
-		tscs42xx->coeff_ram_synced = true;
-	}
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->pll_lock);
-
-unlock_coeff_ram_exit:
-	mutex_unlock(&tscs42xx->coeff_ram_lock);
-
-	return ret;
-}
-#endif // USE_BYTES_EXT
 
 /* D2S Input Select */
 static char const * const d2s_input_select_text[] = {
@@ -715,25 +572,50 @@ static const struct soc_enum dac_mbc3_compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_DACMBCRAT3, FB_DACMBCRAT3_RATIO,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
-#ifdef USE_BYTES_EXT
+int bytes_info_ext(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_info *ucontrol)
+{
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct soc_bytes_ext *params = &ctl->bytes_ext;
+
+	ucontrol->type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	ucontrol->count = params->max;
+
+	return 0;
+}
+
+int bytes_tlv_callback(struct snd_kcontrol *kcontrol, int op_flag,
+	unsigned int size, unsigned int __user *tlv)
+{
+	struct tscs_dsp_ctl *ctl =
+		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct soc_bytes_ext *params = &ctl->bytes_ext;
+	unsigned int count = size < params->max ? size : params->max;
+	int ret = -ENXIO;
+
+	switch (op_flag) {
+	case SNDRV_CTL_TLV_OP_READ:
+		if (params->get)
+			ret = params->get(kcontrol, tlv, count);
+		break;
+	case SNDRV_CTL_TLV_OP_WRITE:
+		if (params->put)
+			ret = params->put(kcontrol, tlv, count);
+		break;
+	}
+	return ret;
+}
+
 #define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
-	.info = snd_soc_bytes_info_ext, \
+	.info = bytes_info_ext, \
 	.get = xhandler_get, .put = xhandler_put, \
-	.private_value = (unsigned long)&(struct tscs_dsp_ctl) \
-		{ {.max = xcount, }, \
-			.addr = xaddr, } }
-#else
-#define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
-{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
-	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE | \
-		  SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK, \
-	.tlv.c = (snd_soc_bytes_tlv_callback), \
-	.info = snd_soc_bytes_info_ext, \
-	.private_value = (unsigned long)&(struct tscs_dsp_ctl) \
-		{ {.max = xcount, .get = xhandler_get, .put = xhandler_put, }, \
-			.addr = xaddr, } }
-#endif
+	.private_value = (unsigned long)&(struct tscs_dsp_ctl) { \
+		.addr = xaddr, \
+		.bytes_ext = {.max = xcount, }, \
+	} \
+}
 
 static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Volumes */
@@ -757,125 +639,125 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_ENUM("Input Channel Map Switch", ch_map_select_enum),
 
 	/* DSP */
-	TSCS_DSP_CTL("Cascade1L BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x00),
-	TSCS_DSP_CTL("Cascade1L BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x05),
-	TSCS_DSP_CTL("Cascade1L BiQuad3", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad3", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x0a),
-	TSCS_DSP_CTL("Cascade1L BiQuad4", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad4", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x0f),
-	TSCS_DSP_CTL("Cascade1L BiQuad5", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad5", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x14),
-	TSCS_DSP_CTL("Cascade1L BiQuad6", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L BiQuad6", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x19),
 
-	TSCS_DSP_CTL("Cascade1R BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x20),
-	TSCS_DSP_CTL("Cascade1R BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x25),
-	TSCS_DSP_CTL("Cascade1R BiQuad3", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad3", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x2a),
-	TSCS_DSP_CTL("Cascade1R BiQuad4", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad4", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x2f),
-	TSCS_DSP_CTL("Cascade1R BiQuad5", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad5", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x34),
-	TSCS_DSP_CTL("Cascade1R BiQuad6", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R BiQuad6", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x39),
 
-	TSCS_DSP_CTL("Cascade1L Prescale", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1L Prescale", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x1f),
-	TSCS_DSP_CTL("Cascade1R Prescale", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade1R Prescale", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x3f),
 
-	TSCS_DSP_CTL("Cascade2L BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x40),
-	TSCS_DSP_CTL("Cascade2L BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x45),
-	TSCS_DSP_CTL("Cascade2L BiQuad3", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad3", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x4a),
-	TSCS_DSP_CTL("Cascade2L BiQuad4", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad4", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x4f),
-	TSCS_DSP_CTL("Cascade2L BiQuad5", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad5", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x54),
-	TSCS_DSP_CTL("Cascade2L BiQuad6", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L BiQuad6", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x59),
 
-	TSCS_DSP_CTL("Cascade2R BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x60),
-	TSCS_DSP_CTL("Cascade2R BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x65),
-	TSCS_DSP_CTL("Cascade2R BiQuad3", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad3", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x6a),
-	TSCS_DSP_CTL("Cascade2R BiQuad4", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad4", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x6f),
-	TSCS_DSP_CTL("Cascade2R BiQuad5", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad5", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x74),
-	TSCS_DSP_CTL("Cascade2R BiQuad6", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R BiQuad6", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x79),
 
-	TSCS_DSP_CTL("Cascade2L Prescale", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2L Prescale", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x5f),
-	TSCS_DSP_CTL("Cascade2R Prescale", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Cascade2R Prescale", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x7f),
 
-	TSCS_DSP_CTL("Bass Extraction BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Extraction BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x80),
-	TSCS_DSP_CTL("Bass Extraction BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Extraction BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x85),
 
-	TSCS_DSP_CTL("Bass Non Linear Function 1", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Non Linear Function 1", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x8a),
-	TSCS_DSP_CTL("Bass Non Linear Function 2", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Non Linear Function 2", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x8b),
 
-	TSCS_DSP_CTL("Bass Limiter BiQuad", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Limiter BiQuad", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x8c),
 
-	TSCS_DSP_CTL("Bass Cut Off BiQuad", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Cut Off BiQuad", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x91),
 
-	TSCS_DSP_CTL("Bass Mix", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Bass Mix", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x96),
 
-	TSCS_DSP_CTL("Treb Extraction BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Extraction BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x97),
-	TSCS_DSP_CTL("Treb Extraction BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Extraction BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0x9c),
 
-	TSCS_DSP_CTL("Treb Non Linear Function 1", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Non Linear Function 1", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xa1),
-	TSCS_DSP_CTL("Treb Non Linear Function 2", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Non Linear Function 2", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xa2),
 
-	TSCS_DSP_CTL("Treb Limiter BiQuad", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Limiter BiQuad", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xa3),
 
-	TSCS_DSP_CTL("Treb Cut Off BiQuad", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Cut Off BiQuad", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xa8),
 
-	TSCS_DSP_CTL("Treb Mix", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("Treb Mix", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xad),
 
-	TSCS_DSP_CTL("3D", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("3D", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xae),
 
-	TSCS_DSP_CTL("3D Mix", COEFF_TLV_SIZE,
+	TSCS_DSP_CTL("3D Mix", COEFF_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xaf),
 
-	TSCS_DSP_CTL("MBC1 BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC1 BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xb0),
-	TSCS_DSP_CTL("MBC1 BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC1 BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xb5),
 
-	TSCS_DSP_CTL("MBC2 BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC2 BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xba),
-	TSCS_DSP_CTL("MBC2 BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC2 BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xbf),
 
-	TSCS_DSP_CTL("MBC3 BiQuad1", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC3 BiQuad1", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xc4),
-	TSCS_DSP_CTL("MBC3 BiQuad2", BIQUAD_TLV_SIZE,
+	TSCS_DSP_CTL("MBC3 BiQuad2", BIQUAD_SIZE,
 		tscs_dsp_get, tscs_dsp_put, 0xc9),
 
 	/* EQ */
@@ -885,22 +767,22 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_ENUM("EQ2 Band Enable Switch", eq2_band_enable_enum),
 
 	/* CLE */
-	SOC_ENUM("CLE Level Detection Switch",
+	SOC_ENUM("CLE Level Detect Switch",
 		cle_level_detection_enum),
-	SOC_ENUM("CLE Level Detection Window Switch",
+	SOC_ENUM("CLE Level Detect Win Switch",
 		cle_level_detection_window_enum),
 	SOC_SINGLE("Expander Switch",
 		R_CLECTL, FB_CLECTL_EXP_EN, 1, 0),
 	SOC_SINGLE("Limiter Switch",
 		R_CLECTL, FB_CLECTL_LIMIT_EN, 1, 0),
-	SOC_SINGLE("Compressor Switch",
+	SOC_SINGLE("Comp Switch",
 		R_CLECTL, FB_CLECTL_COMP_EN, 1, 0),
 	SOC_SINGLE_TLV("CLE Make-Up Gain Playback Volume",
 		R_MUGAIN, FB_MUGAIN_CLEMUG, 0x1f, 0, mugain_scale),
-	SOC_SINGLE_TLV("Compressor Threshold Playback Volume",
+	SOC_SINGLE_TLV("Comp Thresh Playback Volume",
 		R_COMPTH, FB_COMPTH, 0xff, 0, compth_scale),
-	SOC_ENUM("Compressor Ratio", compressor_ratio_enum),
-	SND_SOC_BYTES("Compressor Attack Time", R_CATKTCL, 2),
+	SOC_ENUM("Comp Ratio Switch", compressor_ratio_enum),
+	SND_SOC_BYTES("Comp Atk Time", R_CATKTCL, 2),
 
 	/* Effects */
 	SOC_SINGLE("3D Switch", R_FXCTL, FB_FXCTL_3DEN, 1, 0),
@@ -913,55 +795,54 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_SINGLE("MBC Band1 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN1, 1, 0),
 	SOC_SINGLE("MBC Band2 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN2, 1, 0),
 	SOC_SINGLE("MBC Band3 Switch", R_DACMBCEN, FB_DACMBCEN_MBCEN3, 1, 0),
-	SOC_ENUM("MBC Band1 Level Detection Switch",
+	SOC_ENUM("MBC Band1 Level Detect Switch",
 		mbc_level_detection_enums[0]),
-	SOC_ENUM("MBC Band2 Level Detection Switch",
+	SOC_ENUM("MBC Band2 Level Detect Switch",
 		mbc_level_detection_enums[1]),
-	SOC_ENUM("MBC Band3 Level Detection Switch",
+	SOC_ENUM("MBC Band3 Level Detect Switch",
 		mbc_level_detection_enums[2]),
-	SOC_ENUM("MBC Band1 Level Detection Window Switch",
+	SOC_ENUM("MBC Band1 Level Detect Win Switch",
 		mbc_level_detection_window_enums[0]),
-	SOC_ENUM("MBC Band2 Level Detection Window Switch",
+	SOC_ENUM("MBC Band2 Level Detect Win Switch",
 		mbc_level_detection_window_enums[1]),
-	SOC_ENUM("MBC Band3 Level Detection Window Switch",
+	SOC_ENUM("MBC Band3 Level Detect Win Switch",
 		mbc_level_detection_window_enums[2]),
 
 	SOC_SINGLE("MBC1 Phase Invert", R_DACMBCMUG1, FB_DACMBCMUG1_PHASE,
 		1, 0),
 	SOC_SINGLE_TLV("DAC MBC1 Make-Up Gain Playback Volume",
 		R_DACMBCMUG1, FB_DACMBCMUG1_MUGAIN, 0x1f, 0, mugain_scale),
-	SOC_SINGLE_TLV("DAC MBC1 Compressor Threshold Playback Volume",
+	SOC_SINGLE_TLV("DAC MBC1 Comp Thresh Playback Volume",
 		R_DACMBCTHR1, FB_DACMBCTHR1_THRESH, 0xff, 0, compth_scale),
-	SOC_ENUM("DAC MBC1 Compressor Ratio",
+	SOC_ENUM("DAC MBC1 Comp Ratio Switch",
 		dac_mbc1_compressor_ratio_enum),
-	SND_SOC_BYTES("DAC MBC1 Compressor Attack Time", R_DACMBCATK1L, 2),
-	SND_SOC_BYTES("DAC MBC1 Compressor Release Time Constant",
+	SND_SOC_BYTES("DAC MBC1 Comp Atk Time", R_DACMBCATK1L, 2),
+	SND_SOC_BYTES("DAC MBC1 Comp Rel Time Const",
 		R_DACMBCREL1L, 2),
 
 	SOC_SINGLE("MBC2 Phase Invert", R_DACMBCMUG2, FB_DACMBCMUG2_PHASE,
 		1, 0),
 	SOC_SINGLE_TLV("DAC MBC2 Make-Up Gain Playback Volume",
 		R_DACMBCMUG2, FB_DACMBCMUG2_MUGAIN, 0x1f, 0, mugain_scale),
-	SOC_SINGLE_TLV("DAC MBC2 Compressor Threshold Playback Volume",
+	SOC_SINGLE_TLV("DAC MBC2 Comp Thresh Playback Volume",
 		R_DACMBCTHR2, FB_DACMBCTHR2_THRESH, 0xff, 0, compth_scale),
-	SOC_ENUM("DAC MBC2 Compressor Ratio",
+	SOC_ENUM("DAC MBC2 Comp Ratio Switch",
 		dac_mbc2_compressor_ratio_enum),
-	SND_SOC_BYTES("DAC MBC2 Compressor Attack Time", R_DACMBCATK2L, 2),
-	SND_SOC_BYTES("DAC MBC2 Compressor Release Time Constant",
+	SND_SOC_BYTES("DAC MBC2 Comp Atk Time", R_DACMBCATK2L, 2),
+	SND_SOC_BYTES("DAC MBC2 Comp Rel Time Const",
 		R_DACMBCREL2L, 2),
 
 	SOC_SINGLE("MBC3 Phase Invert", R_DACMBCMUG3, FB_DACMBCMUG3_PHASE,
 		1, 0),
 	SOC_SINGLE_TLV("DAC MBC3 Make-Up Gain Playback Volume",
 		R_DACMBCMUG3, FB_DACMBCMUG3_MUGAIN, 0x1f, 0, mugain_scale),
-	SOC_SINGLE_TLV("DAC MBC3 Compressor Threshold Playback Volume",
+	SOC_SINGLE_TLV("DAC MBC3 Comp Thresh Playback Volume",
 		R_DACMBCTHR3, FB_DACMBCTHR3_THRESH, 0xff, 0, compth_scale),
-	SOC_ENUM("DAC MBC3 Compressor Ratio",
+	SOC_ENUM("DAC MBC3 Comp Ratio Switch",
 		dac_mbc3_compressor_ratio_enum),
-	SND_SOC_BYTES("DAC MBC3 Compressor Attack Time", R_DACMBCATK3L, 2),
-	SND_SOC_BYTES("DAC MBC3 Compressor Release Time Constant",
+	SND_SOC_BYTES("DAC MBC3 Comp Atk Time", R_DACMBCATK3L, 2),
+	SND_SOC_BYTES("DAC MBC3 Comp Rel Time Const",
 		R_DACMBCREL3L, 2),
-
 };
 
 #define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
