@@ -86,12 +86,6 @@ static const struct regmap_config tscs42xx_regmap = {
 	.can_multi_write = true,
 };
 
-static struct reg_default r_inits[] = {
-	{ .reg = R_ADCSR,	.def = RV_ADCSR_ABCM_64 },
-	{ .reg = R_DACSR,	.def = RV_DACSR_DBCM_64 },
-	{ .reg = R_AIC2,	.def = RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
-};
-
 #define MAX_PLL_LOCK_20MS_WAITS 1
 static bool plls_locked(struct snd_soc_codec *codec)
 {
@@ -132,52 +126,34 @@ static int sample_rate_to_pll_freq_out(int sample_rate)
 	}
 }
 
-static int power_down_audio_plls(struct snd_soc_codec *codec)
-{
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	int ret;
-
-	mutex_lock(&tscs42xx->pll_lock);
-
-	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
-			RM_PLLCTL1C_PDB_PLL1,
-			RV_PLLCTL1C_PDB_PLL1_DISABLE);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		goto exit;
-	}
-	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
-			RM_PLLCTL1C_PDB_PLL2,
-			RV_PLLCTL1C_PDB_PLL2_DISABLE);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
-		goto exit;
-	}
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->pll_lock);
-
-	return ret;
-}
-
+#define DACCRSTAT_MAX_TRYS 10
 static int coefficient_ram_write(struct snd_soc_codec *codec, u8 *coeff_ram,
 	unsigned int addr, unsigned int coeff_cnt)
 {
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int cnt;
+	int trys;
 	int ret;
 
 	for (cnt = 0; cnt < coeff_cnt; cnt++, addr++) {
 
-		do {
+		for (trys = 0; trys < DACCRSTAT_MAX_TRYS; trys++) {
 			ret = snd_soc_read(codec, R_DACCRSTAT);
 			if (ret < 0) {
 				dev_err(codec->dev,
 					"Failed to read stat (%d)\n", ret);
 				return ret;
 			}
-		} while (ret);
+			if (!ret)
+				break;
+		}
+
+		if (trys == DACCRSTAT_MAX_TRYS) {
+			ret = -EIO;
+			dev_err(codec->dev,
+				"dac coefficient write error (%d)\n", ret);
+			return ret;
+		}
 
 		ret = regmap_write(tscs42xx->regmap, R_DACCRADDR, addr);
 		if (ret < 0) {
@@ -221,11 +197,6 @@ exit:
 	return ret;
 }
 
-static int do_pll_lock_dependent_work(struct snd_soc_codec *codec)
-{
-	return coefficient_ram_sync(codec);
-}
-
 static int power_up_audio_plls(struct snd_soc_codec *codec)
 {
 	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
@@ -264,9 +235,34 @@ static int power_up_audio_plls(struct snd_soc_codec *codec)
 		goto exit;
 	}
 
-	ret = do_pll_lock_dependent_work(codec);
-	if (ret < 0)
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->pll_lock);
+
+	return ret;
+}
+
+static int power_down_audio_plls(struct snd_soc_codec *codec)
+{
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	int ret;
+
+	mutex_lock(&tscs42xx->pll_lock);
+
+	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
+			RM_PLLCTL1C_PDB_PLL1,
+			RV_PLLCTL1C_PDB_PLL1_DISABLE);
+	if (ret < 0) {
+		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
 		goto exit;
+	}
+	ret = snd_soc_update_bits(codec, R_PLLCTL1C,
+			RM_PLLCTL1C_PDB_PLL2,
+			RV_PLLCTL1C_PDB_PLL2_DISABLE);
+	if (ret < 0) {
+		dev_err(codec->dev, "Failed to turn PLL off (%d)\n", ret);
+		goto exit;
+	}
 
 	ret = 0;
 exit:
@@ -389,9 +385,27 @@ static int dapm_micb_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+int pll_supply_event(struct snd_soc_dapm_widget *w,
+		   struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	int ret;
+
+	if (SND_SOC_DAPM_EVENT_ON(event))
+		ret = power_up_audio_plls(codec);
+	else
+		ret = power_down_audio_plls(codec);
+
+	return ret;
+}
+
 static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY_S("Vref", 1, R_PWRM2, FB_PWRM2_VREF, 0,
 		dapm_vref_event, SND_SOC_DAPM_POST_PMU|SND_SOC_DAPM_PRE_PMD),
+
+	/* PLLs */
+	SND_SOC_DAPM_SUPPLY("PLL", SND_SOC_NOPM, 0, 0, pll_supply_event,
+		(SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD)),
 
 	/* Headphone */
 	SND_SOC_DAPM_DAC("DAC L", "HiFi Playback", R_PWRM2, FB_PWRM2_HPL, 0),
@@ -443,11 +457,15 @@ static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route tscs42xx_intercon[] = {
+	{"DAC L", NULL, "PLL"},
+	{"DAC R", NULL, "PLL"},
 	{"DAC L", NULL, "Vref"},
 	{"DAC R", NULL, "Vref"},
 	{"Headphone L", NULL, "DAC L"},
 	{"Headphone R", NULL, "DAC R"},
 
+	{"ClassD L", NULL, "PLL"},
+	{"ClassD R", NULL, "PLL"},
 	{"ClassD L", NULL, "Vref"},
 	{"ClassD R", NULL, "Vref"},
 	{"Speaker L", NULL, "ClassD L"},
@@ -471,6 +489,8 @@ static const struct snd_soc_dapm_route tscs42xx_intercon[] = {
 	{"Analog Boost R", NULL, "Analog In PGA R"},
 	{"ADC Mute", NULL, "Analog Boost L"},
 	{"ADC Mute", NULL, "Analog Boost R"},
+	{"ADC L", NULL, "PLL"},
+	{"ADC R", NULL, "PLL"},
 	{"ADC L", NULL, "ADC Mute"},
 	{"ADC R", NULL, "ADC Mute"},
 };
@@ -572,7 +592,7 @@ static const struct soc_enum dac_mbc3_compressor_ratio_enum =
 	SOC_ENUM_SINGLE(R_DACMBCRAT3, FB_DACMBCRAT3_RATIO,
 		ARRAY_SIZE(compressor_ratio_text), compressor_ratio_text);
 
-int bytes_info_ext(struct snd_kcontrol *kcontrol,
+static int bytes_info_ext(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *ucontrol)
 {
 	struct tscs_dsp_ctl *ctl =
@@ -583,28 +603,6 @@ int bytes_info_ext(struct snd_kcontrol *kcontrol,
 	ucontrol->count = params->max;
 
 	return 0;
-}
-
-int bytes_tlv_callback(struct snd_kcontrol *kcontrol, int op_flag,
-	unsigned int size, unsigned int __user *tlv)
-{
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
-	struct soc_bytes_ext *params = &ctl->bytes_ext;
-	unsigned int count = size < params->max ? size : params->max;
-	int ret = -ENXIO;
-
-	switch (op_flag) {
-	case SNDRV_CTL_TLV_OP_READ:
-		if (params->get)
-			ret = params->get(kcontrol, tlv, count);
-		break;
-	case SNDRV_CTL_TLV_OP_WRITE:
-		if (params->put)
-			ret = params->put(kcontrol, tlv, count);
-		break;
-	}
-	return ret;
 }
 
 #define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
@@ -1136,6 +1134,13 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 		return ret;
 	}
 
+	ret = coefficient_ram_sync(codec);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to sync coefficient ram (%d)\n", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -1151,13 +1156,6 @@ static int dac_mute(struct snd_soc_codec *codec)
 		return ret;
 	}
 
-	ret = power_down_audio_plls(codec);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to power down plls (%d)\n",
-			ret);
-		return ret;
-	}
-
 	return 0;
 }
 
@@ -1165,17 +1163,9 @@ static int dac_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
-	ret = power_up_audio_plls(codec);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to power up plls (%d)\n",
-			ret);
-		return ret;
-	}
-
 	ret = snd_soc_update_bits(codec, R_CNVRTR1, RM_CNVRTR1_DACMU,
 		RV_CNVRTR1_DACMU_DISABLE);
 	if (ret < 0) {
-		power_down_audio_plls(codec);
 		dev_err(codec->dev, "Failed to unmute DAC (%d)\n",
 				ret);
 		return ret;
@@ -1196,13 +1186,6 @@ static int adc_mute(struct snd_soc_codec *codec)
 		return ret;
 	}
 
-	ret = power_down_audio_plls(codec);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to power down plls (%d)\n",
-			ret);
-		return ret;
-	}
-
 	return 0;
 }
 
@@ -1210,17 +1193,9 @@ static int adc_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
-	ret = power_up_audio_plls(codec);
-	if (ret < 0) {
-		dev_err(codec->dev, "Failed to power up plls (%d)\n",
-			ret);
-		return ret;
-	}
-
 	ret = snd_soc_update_bits(codec, R_CNVRTR0, RM_CNVRTR0_ADCMU,
 		RV_CNVRTR0_ADCMU_DISABLE);
 	if (ret < 0) {
-		power_down_audio_plls(codec);
 		dev_err(codec->dev, "Failed to unmute ADC (%d)\n",
 				ret);
 		return ret;
@@ -1255,22 +1230,31 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	int ret;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
+		ret = snd_soc_update_bits(codec, R_AIC1, RM_AIC1_MS,
+				RV_AIC1_MS_SLAVE);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set codec DAI slave (%d)\n", ret);
+			return ret;
+		}
+		break;
 	case SND_SOC_DAIFMT_CBM_CFM:
 		ret = snd_soc_update_bits(codec, R_AIC1, RM_AIC1_MS,
 				RV_AIC1_MS_MASTER);
-		if (ret < 0)
+		if (ret < 0) {
 			dev_err(codec->dev,
 				"Failed to set codec DAI master (%d)\n", ret);
-		else
-			ret = 0;
+			return ret;
+		}
 		break;
 	default:
 		ret = -EINVAL;
 		dev_err(codec->dev, "Unsupported format (%d)\n", ret);
-		break;
+		return ret;
 	}
 
-	return ret;
+	return 0;
 }
 
 static int tscs42xx_set_dai_bclk_ratio(struct snd_soc_dai *codec_dai,
@@ -1416,31 +1400,7 @@ static int part_is_valid(struct tscs42xx_priv *tscs42xx)
 	return ret;
 }
 
-static int tscs42xx_probe(struct snd_soc_codec *codec)
-{
-	int i;
-	int ret;
-
-	for (i = 0; i < ARRAY_SIZE(r_inits); ++i) {
-		ret = snd_soc_write(codec, r_inits[i].reg, r_inits[i].def);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to write codec defaults (%d)\n", ret);
-			return ret;
-		}
-	}
-
-	return 0;
-}
-
-static int tscs42xx_remove(struct snd_soc_codec *codec)
-{
-	return 0;
-}
-
 static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
-	.probe =	tscs42xx_probe,
-	.remove =	tscs42xx_remove,
 	.component_driver = {
 		.dapm_widgets = tscs42xx_dapm_widgets,
 		.num_dapm_widgets = ARRAY_SIZE(tscs42xx_dapm_widgets),
@@ -1453,16 +1413,16 @@ static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
 
 static void init_coeff_ram_defaults(struct tscs42xx_priv *tscs42xx)
 {
-	const u8 norms[] = { 0x00, 0x05, 0x0a, 0x0f, 0x14, 0x19, 0x1f, 0x20,
-		0x25, 0x2a, 0x2f, 0x34, 0x39, 0x3f, 0x40, 0x45, 0x4a, 0x4f,
-		0x54, 0x59, 0x5f, 0x60, 0x65, 0x6a, 0x6f, 0x74, 0x79, 0x7f,
-		0x80, 0x85, 0x8c, 0x91, 0x96, 0x97, 0x9c, 0xa3, 0xa8, 0xad,
-		0xaf, 0xb0, 0xb5, 0xba, 0xbf, 0xc4, 0xc9, };
+	const u8 norm_addrs[] = { 0x00, 0x05, 0x0a, 0x0f, 0x14, 0x19, 0x1f,
+		0x20, 0x25, 0x2a, 0x2f, 0x34, 0x39, 0x3f, 0x40, 0x45, 0x4a,
+		0x4f, 0x54, 0x59, 0x5f, 0x60, 0x65, 0x6a, 0x6f, 0x74, 0x79,
+		0x7f, 0x80, 0x85, 0x8c, 0x91, 0x96, 0x97, 0x9c, 0xa3, 0xa8,
+		0xad, 0xaf, 0xb0, 0xb5, 0xba, 0xbf, 0xc4, 0xc9, };
 	u8 *coeff_ram = tscs42xx->coeff_ram;
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(norms); i++)
-		coeff_ram[((norms[i] + 1) * COEFF_SIZE) - 1] = 0x40;
+	for (i = 0; i < ARRAY_SIZE(norm_addrs); i++)
+		coeff_ram[((norm_addrs[i] + 1) * COEFF_SIZE) - 1] = 0x40;
 }
 
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
@@ -1521,13 +1481,15 @@ static int tscs42xx_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tscs42xx_i2c_id[] = {
-	{ "tscs42xx", 0 },
+	{ "tscs42A1", 0 },
+	{ "tscs42A2", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tscs42xx_i2c_id);
 
 static const struct of_device_id tscs42xx_of_match[] = {
-	{ .compatible = "tscs,tscs42xx", },
+	{ .compatible = "tempo,tscs42A1", },
+	{ .compatible = "tempo,tscs42A2", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, tscs42xx_of_match);

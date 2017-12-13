@@ -12,8 +12,8 @@
 			#size-cells = <0>;
 			status = "okay";
 
-			codec: tscs42xx@69 {
-				compatible = "tscs,tscs42xx";
+			codec: tscs42A2@69 {
+				compatible = "tempo,tscs42A2";
 				reg = <0x69>;
 				status = "okay";
 			};
@@ -30,7 +30,7 @@
 	fragment@2 {
 		target = <&sound>;
 		__overlay__ {
-			compatible = "rpi-tscs,rpi-tscs42xx";
+			compatible = "tempo,rpi-wookie";
 			i2s-controller = <&i2s>;
 			audio-codec = <&codec>;
 			mclk-src = "xtal";	

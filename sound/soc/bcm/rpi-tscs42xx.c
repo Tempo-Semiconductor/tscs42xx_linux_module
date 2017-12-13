@@ -177,6 +177,14 @@ static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 
 	tempo_debug("");
 
+	ret = snd_soc_update_bits(rtd->codec, R_AIC2, RM_AIC2_BLRCM,
+		RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED);
+	if (ret < 0) {
+		dev_err(rtd->codec->dev,
+			"Failed to setup audio interface (%d)\n", ret);
+		return ret;
+	}
+
 	ret = snd_soc_dai_set_bclk_ratio(rtd->codec_dai, 64);
 	if (ret < 0) {
 		dev_err(rtd->codec->dev, "Failed to set codec bclk ratio");
@@ -407,14 +415,14 @@ static int snd_rpi_tscs42xx_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id snd_rpi_tscs42xx_of_match[] = {
-	{ .compatible = "rpi-tscs,rpi-tscs42xx", },
+	{ .compatible = "tempo,rpi-wookie", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, snd_rpi_tscs42xx_of_match);
 
 static struct platform_driver snd_rpi_tscs42xx_driver = {
 	.driver = {
-		.name   = "snd-rpi-tscs42xx",
+		.name   = "snd-rpi-wookie",
 		.owner  = THIS_MODULE,
 		.of_match_table = snd_rpi_tscs42xx_of_match,
 	},
