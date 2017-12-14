@@ -9,6 +9,7 @@
 #include <linux/regmap.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
+#include <sound/soc-dapm.h>
 #include <sound/tlv.h>
 
 #include "tscs42xx.h"
@@ -173,28 +174,6 @@ static int coefficient_ram_write(struct snd_soc_codec *codec, u8 *coeff_ram,
 	}
 
 	return 0;
-}
-
-static int coefficient_ram_sync(struct snd_soc_codec *codec)
-{
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	int ret;
-
-	mutex_lock(&tscs42xx->coeff_ram_lock);
-
-	if (tscs42xx->coeff_ram_synced == false) {
-		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram, 0x00,
-			COEFF_RAM_COEFF_COUNT);
-		if (ret < 0)
-			goto exit;
-		tscs42xx->coeff_ram_synced = true;
-	}
-
-	ret = 0;
-exit:
-	mutex_unlock(&tscs42xx->coeff_ram_lock);
-
-	return ret;
 }
 
 static int power_up_audio_plls(struct snd_soc_codec *codec)
@@ -385,7 +364,7 @@ static int dapm_micb_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
-int pll_supply_event(struct snd_soc_dapm_widget *w,
+int pll_event(struct snd_soc_dapm_widget *w,
 		   struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
@@ -399,25 +378,53 @@ int pll_supply_event(struct snd_soc_dapm_widget *w,
 	return ret;
 }
 
+int dac_event(struct snd_soc_dapm_widget *w,
+		   struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	int ret;
+
+	mutex_lock(&tscs42xx->coeff_ram_lock);
+
+	if (tscs42xx->coeff_ram_synced == false) {
+		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram, 0x00,
+			COEFF_RAM_COEFF_COUNT);
+		if (ret < 0)
+			goto exit;
+		tscs42xx->coeff_ram_synced = true;
+	}
+
+	ret = 0;
+exit:
+	mutex_unlock(&tscs42xx->coeff_ram_lock);
+
+	return ret;
+}
+
 static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY_S("Vref", 1, R_PWRM2, FB_PWRM2_VREF, 0,
 		dapm_vref_event, SND_SOC_DAPM_POST_PMU|SND_SOC_DAPM_PRE_PMD),
 
-	/* PLLs */
-	SND_SOC_DAPM_SUPPLY("PLL", SND_SOC_NOPM, 0, 0, pll_supply_event,
-		(SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD)),
+	/* PLL */
+	SND_SOC_DAPM_SUPPLY("PLL", SND_SOC_NOPM, 0, 0, pll_event,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	/* Headphone */
-	SND_SOC_DAPM_DAC("DAC L", "HiFi Playback", R_PWRM2, FB_PWRM2_HPL, 0),
-	SND_SOC_DAPM_DAC("DAC R", "HiFi Playback", R_PWRM2, FB_PWRM2_HPR, 0),
+	SND_SOC_DAPM_DAC_E("DAC L", "HiFi Playback", R_PWRM2, FB_PWRM2_HPL, 0,
+			dac_event, SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_DAC_E("DAC R", "HiFi Playback", R_PWRM2, FB_PWRM2_HPR, 0,
+			dac_event, SND_SOC_DAPM_POST_PMU),
 	SND_SOC_DAPM_OUTPUT("Headphone L"),
 	SND_SOC_DAPM_OUTPUT("Headphone R"),
 
 	/* Speaker */
-	SND_SOC_DAPM_DAC("ClassD L", "HiFi Playback",
-		R_PWRM2, FB_PWRM2_SPKL, 0),
-	SND_SOC_DAPM_DAC("ClassD R", "HiFi Playback",
-		R_PWRM2, FB_PWRM2_SPKR, 0),
+	SND_SOC_DAPM_DAC_E("ClassD L", "HiFi Playback",
+		R_PWRM2, FB_PWRM2_SPKL, 0,
+		dac_event, SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_DAC_E("ClassD R", "HiFi Playback",
+		R_PWRM2, FB_PWRM2_SPKR, 0,
+		dac_event, SND_SOC_DAPM_POST_PMU),
 	SND_SOC_DAPM_OUTPUT("Speaker L"),
 	SND_SOC_DAPM_OUTPUT("Speaker R"),
 
@@ -1134,13 +1141,6 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 		return ret;
 	}
 
-	ret = coefficient_ram_sync(codec);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to sync coefficient ram (%d)\n", ret);
-		return ret;
-	}
-
 	return 0;
 }
 
@@ -1229,16 +1229,8 @@ static int tscs42xx_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	struct snd_soc_codec *codec = codec_dai->codec;
 	int ret;
 
+	/* Slave mode not supported since it needs always-on frame clock */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
-		ret = snd_soc_update_bits(codec, R_AIC1, RM_AIC1_MS,
-				RV_AIC1_MS_SLAVE);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set codec DAI slave (%d)\n", ret);
-			return ret;
-		}
-		break;
 	case SND_SOC_DAIFMT_CBM_CFM:
 		ret = snd_soc_update_bits(codec, R_AIC1, RM_AIC1_MS,
 				RV_AIC1_MS_MASTER);
