@@ -22,7 +22,7 @@
 #define COEFF_RAM_COEFF_COUNT (COEFF_RAM_MAX_ADDR + 1)
 #define COEFF_RAM_SIZE (COEFF_SIZE * COEFF_RAM_COEFF_COUNT)
 
-struct tscs42xx_priv {
+struct tscs42xx {
 
 	int bclk_ratio;
 	int samplerate;
@@ -37,7 +37,7 @@ struct tscs42xx_priv {
 	struct regmap *regmap;
 };
 
-struct tscs_dsp_ctl {
+struct coeff_ram_ctl {
 	unsigned int addr;
 	struct soc_bytes_ext bytes_ext;
 };
@@ -128,10 +128,10 @@ static int sample_rate_to_pll_freq_out(int sample_rate)
 }
 
 #define DACCRSTAT_MAX_TRYS 10
-static int coefficient_ram_write(struct snd_soc_codec *codec, u8 *coeff_ram,
+static int write_coeff_ram(struct snd_soc_codec *codec, u8 *coeff_ram,
 	unsigned int addr, unsigned int coeff_cnt)
 {
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int cnt;
 	int trys;
 	int ret;
@@ -178,7 +178,7 @@ static int coefficient_ram_write(struct snd_soc_codec *codec, u8 *coeff_ram,
 
 static int power_up_audio_plls(struct snd_soc_codec *codec)
 {
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int freq_out;
 	int ret;
 	unsigned int mask;
@@ -223,7 +223,7 @@ exit:
 
 static int power_down_audio_plls(struct snd_soc_codec *codec)
 {
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
 	mutex_lock(&tscs42xx->pll_lock);
@@ -250,13 +250,13 @@ exit:
 	return ret;
 }
 
-static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
+static int coeff_ram_get(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct coeff_ram_ctl *ctl =
+		(struct coeff_ram_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
@@ -269,13 +269,13 @@ static int tscs_dsp_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
+static int coeff_ram_put(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct coeff_ram_ctl *ctl =
+		(struct coeff_ram_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
 	unsigned int coeff_cnt = params->max / COEFF_SIZE;
 	int ret;
@@ -290,7 +290,7 @@ static int tscs_dsp_put(struct snd_kcontrol *kcontrol,
 	mutex_lock(&tscs42xx->pll_lock);
 
 	if (plls_locked(codec)) {
-		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram,
+		ret = write_coeff_ram(codec, tscs42xx->coeff_ram,
 			ctl->addr, coeff_cnt);
 		if (ret < 0) {
 			dev_err(codec->dev,
@@ -382,13 +382,13 @@ int dac_event(struct snd_soc_dapm_widget *w,
 		   struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
 	mutex_lock(&tscs42xx->coeff_ram_lock);
 
 	if (tscs42xx->coeff_ram_synced == false) {
-		ret = coefficient_ram_write(codec, tscs42xx->coeff_ram, 0x00,
+		ret = write_coeff_ram(codec, tscs42xx->coeff_ram, 0x00,
 			COEFF_RAM_COEFF_COUNT);
 		if (ret < 0)
 			goto exit;
@@ -403,6 +403,7 @@ exit:
 }
 
 static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
+	/* Vref */
 	SND_SOC_DAPM_SUPPLY_S("Vref", 1, R_PWRM2, FB_PWRM2_VREF, 0,
 		dapm_vref_event, SND_SOC_DAPM_POST_PMU|SND_SOC_DAPM_PRE_PMD),
 
@@ -602,8 +603,8 @@ static const struct soc_enum dac_mbc3_compressor_ratio_enum =
 static int bytes_info_ext(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *ucontrol)
 {
-	struct tscs_dsp_ctl *ctl =
-		(struct tscs_dsp_ctl *)kcontrol->private_value;
+	struct coeff_ram_ctl *ctl =
+		(struct coeff_ram_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
 
 	ucontrol->type = SNDRV_CTL_ELEM_TYPE_BYTES;
@@ -612,11 +613,11 @@ static int bytes_info_ext(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-#define TSCS_DSP_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
+#define COEFF_RAM_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
 	.info = bytes_info_ext, \
 	.get = xhandler_get, .put = xhandler_put, \
-	.private_value = (unsigned long)&(struct tscs_dsp_ctl) { \
+	.private_value = (unsigned long)&(struct coeff_ram_ctl) { \
 		.addr = xaddr, \
 		.bytes_ext = {.max = xcount, }, \
 	} \
@@ -643,127 +644,127 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	/* Input Channel Map */
 	SOC_ENUM("Input Channel Map Switch", ch_map_select_enum),
 
-	/* DSP */
-	TSCS_DSP_CTL("Cascade1L BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x00),
-	TSCS_DSP_CTL("Cascade1L BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x05),
-	TSCS_DSP_CTL("Cascade1L BiQuad3", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x0a),
-	TSCS_DSP_CTL("Cascade1L BiQuad4", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x0f),
-	TSCS_DSP_CTL("Cascade1L BiQuad5", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x14),
-	TSCS_DSP_CTL("Cascade1L BiQuad6", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x19),
+	/* Coefficient Ram */
+	COEFF_RAM_CTL("Cascade1L BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x00),
+	COEFF_RAM_CTL("Cascade1L BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x05),
+	COEFF_RAM_CTL("Cascade1L BiQuad3", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x0a),
+	COEFF_RAM_CTL("Cascade1L BiQuad4", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x0f),
+	COEFF_RAM_CTL("Cascade1L BiQuad5", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x14),
+	COEFF_RAM_CTL("Cascade1L BiQuad6", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x19),
 
-	TSCS_DSP_CTL("Cascade1R BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x20),
-	TSCS_DSP_CTL("Cascade1R BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x25),
-	TSCS_DSP_CTL("Cascade1R BiQuad3", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x2a),
-	TSCS_DSP_CTL("Cascade1R BiQuad4", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x2f),
-	TSCS_DSP_CTL("Cascade1R BiQuad5", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x34),
-	TSCS_DSP_CTL("Cascade1R BiQuad6", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x39),
+	COEFF_RAM_CTL("Cascade1R BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x20),
+	COEFF_RAM_CTL("Cascade1R BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x25),
+	COEFF_RAM_CTL("Cascade1R BiQuad3", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x2a),
+	COEFF_RAM_CTL("Cascade1R BiQuad4", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x2f),
+	COEFF_RAM_CTL("Cascade1R BiQuad5", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x34),
+	COEFF_RAM_CTL("Cascade1R BiQuad6", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x39),
 
-	TSCS_DSP_CTL("Cascade1L Prescale", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x1f),
-	TSCS_DSP_CTL("Cascade1R Prescale", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x3f),
+	COEFF_RAM_CTL("Cascade1L Prescale", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x1f),
+	COEFF_RAM_CTL("Cascade1R Prescale", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x3f),
 
-	TSCS_DSP_CTL("Cascade2L BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x40),
-	TSCS_DSP_CTL("Cascade2L BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x45),
-	TSCS_DSP_CTL("Cascade2L BiQuad3", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x4a),
-	TSCS_DSP_CTL("Cascade2L BiQuad4", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x4f),
-	TSCS_DSP_CTL("Cascade2L BiQuad5", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x54),
-	TSCS_DSP_CTL("Cascade2L BiQuad6", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x59),
+	COEFF_RAM_CTL("Cascade2L BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x40),
+	COEFF_RAM_CTL("Cascade2L BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x45),
+	COEFF_RAM_CTL("Cascade2L BiQuad3", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x4a),
+	COEFF_RAM_CTL("Cascade2L BiQuad4", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x4f),
+	COEFF_RAM_CTL("Cascade2L BiQuad5", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x54),
+	COEFF_RAM_CTL("Cascade2L BiQuad6", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x59),
 
-	TSCS_DSP_CTL("Cascade2R BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x60),
-	TSCS_DSP_CTL("Cascade2R BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x65),
-	TSCS_DSP_CTL("Cascade2R BiQuad3", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x6a),
-	TSCS_DSP_CTL("Cascade2R BiQuad4", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x6f),
-	TSCS_DSP_CTL("Cascade2R BiQuad5", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x74),
-	TSCS_DSP_CTL("Cascade2R BiQuad6", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x79),
+	COEFF_RAM_CTL("Cascade2R BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x60),
+	COEFF_RAM_CTL("Cascade2R BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x65),
+	COEFF_RAM_CTL("Cascade2R BiQuad3", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x6a),
+	COEFF_RAM_CTL("Cascade2R BiQuad4", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x6f),
+	COEFF_RAM_CTL("Cascade2R BiQuad5", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x74),
+	COEFF_RAM_CTL("Cascade2R BiQuad6", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x79),
 
-	TSCS_DSP_CTL("Cascade2L Prescale", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x5f),
-	TSCS_DSP_CTL("Cascade2R Prescale", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x7f),
+	COEFF_RAM_CTL("Cascade2L Prescale", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x5f),
+	COEFF_RAM_CTL("Cascade2R Prescale", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x7f),
 
-	TSCS_DSP_CTL("Bass Extraction BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x80),
-	TSCS_DSP_CTL("Bass Extraction BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x85),
+	COEFF_RAM_CTL("Bass Extraction BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x80),
+	COEFF_RAM_CTL("Bass Extraction BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x85),
 
-	TSCS_DSP_CTL("Bass Non Linear Function 1", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x8a),
-	TSCS_DSP_CTL("Bass Non Linear Function 2", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x8b),
+	COEFF_RAM_CTL("Bass Non Linear Function 1", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x8a),
+	COEFF_RAM_CTL("Bass Non Linear Function 2", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x8b),
 
-	TSCS_DSP_CTL("Bass Limiter BiQuad", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x8c),
+	COEFF_RAM_CTL("Bass Limiter BiQuad", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x8c),
 
-	TSCS_DSP_CTL("Bass Cut Off BiQuad", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x91),
+	COEFF_RAM_CTL("Bass Cut Off BiQuad", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x91),
 
-	TSCS_DSP_CTL("Bass Mix", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x96),
+	COEFF_RAM_CTL("Bass Mix", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x96),
 
-	TSCS_DSP_CTL("Treb Extraction BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x97),
-	TSCS_DSP_CTL("Treb Extraction BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0x9c),
+	COEFF_RAM_CTL("Treb Extraction BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x97),
+	COEFF_RAM_CTL("Treb Extraction BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0x9c),
 
-	TSCS_DSP_CTL("Treb Non Linear Function 1", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xa1),
-	TSCS_DSP_CTL("Treb Non Linear Function 2", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xa2),
+	COEFF_RAM_CTL("Treb Non Linear Function 1", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xa1),
+	COEFF_RAM_CTL("Treb Non Linear Function 2", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xa2),
 
-	TSCS_DSP_CTL("Treb Limiter BiQuad", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xa3),
+	COEFF_RAM_CTL("Treb Limiter BiQuad", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xa3),
 
-	TSCS_DSP_CTL("Treb Cut Off BiQuad", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xa8),
+	COEFF_RAM_CTL("Treb Cut Off BiQuad", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xa8),
 
-	TSCS_DSP_CTL("Treb Mix", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xad),
+	COEFF_RAM_CTL("Treb Mix", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xad),
 
-	TSCS_DSP_CTL("3D", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xae),
+	COEFF_RAM_CTL("3D", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xae),
 
-	TSCS_DSP_CTL("3D Mix", COEFF_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xaf),
+	COEFF_RAM_CTL("3D Mix", COEFF_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xaf),
 
-	TSCS_DSP_CTL("MBC1 BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xb0),
-	TSCS_DSP_CTL("MBC1 BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xb5),
+	COEFF_RAM_CTL("MBC1 BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xb0),
+	COEFF_RAM_CTL("MBC1 BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xb5),
 
-	TSCS_DSP_CTL("MBC2 BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xba),
-	TSCS_DSP_CTL("MBC2 BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xbf),
+	COEFF_RAM_CTL("MBC2 BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xba),
+	COEFF_RAM_CTL("MBC2 BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xbf),
 
-	TSCS_DSP_CTL("MBC3 BiQuad1", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xc4),
-	TSCS_DSP_CTL("MBC3 BiQuad2", BIQUAD_SIZE,
-		tscs_dsp_get, tscs_dsp_put, 0xc9),
+	COEFF_RAM_CTL("MBC3 BiQuad1", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xc4),
+	COEFF_RAM_CTL("MBC3 BiQuad2", BIQUAD_SIZE,
+		coeff_ram_get, coeff_ram_put, 0xc9),
 
 	/* EQ */
 	SOC_SINGLE("EQ1 Switch", R_CONFIG1, FB_CONFIG1_EQ1_EN, 1, 0),
@@ -890,7 +891,7 @@ static int setup_sample_format(struct snd_soc_codec *codec,
 
 static int setup_sample_rate(struct snd_soc_codec *codec, unsigned int rate)
 {
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	unsigned int br, bm;
 	int ret;
 
@@ -983,25 +984,25 @@ struct pll_ctl {
 	struct reg_setting settings[PLL_REG_SETTINGS_COUNT];
 };
 
-#define PLL_CTL(f, rt, rd, r1b_l, r9, ra, rb,				\
-		rc, r12, r1b_h, re, rf, r10, r11)			\
-	{								\
-		.input_freq = f,					\
-		.settings = {						\
-			{R_TIMEBASE,  rt,   0xFF},			\
-			{R_PLLCTLD,   rd,   0xFF},			\
-			{R_PLLCTL1B, r1b_l, 0x0F},			\
-			{R_PLLCTL9,   r9,   0xFF},			\
-			{R_PLLCTLA,   ra,   0xFF},			\
-			{R_PLLCTLB,   rb,   0xFF},			\
-			{R_PLLCTLC,   rc,   0xFF},			\
-			{R_PLLCTL12, r12,   0xFF},			\
-			{R_PLLCTL1B, r1b_h, 0xF0},			\
-			{R_PLLCTLE,   re,   0xFF},			\
-			{R_PLLCTLF,   rf,   0xFF},			\
-			{R_PLLCTL10, r10,   0xFF},			\
-			{R_PLLCTL11, r11,   0xFF},			\
-		},							\
+#define PLL_CTL(f, rt, rd, r1b_l, r9, ra, rb,		\
+		rc, r12, r1b_h, re, rf, r10, r11)	\
+	{						\
+		.input_freq = f,			\
+		.settings = {				\
+			{R_TIMEBASE,  rt,   0xFF},	\
+			{R_PLLCTLD,   rd,   0xFF},	\
+			{R_PLLCTL1B, r1b_l, 0x0F},	\
+			{R_PLLCTL9,   r9,   0xFF},	\
+			{R_PLLCTLA,   ra,   0xFF},	\
+			{R_PLLCTLB,   rb,   0xFF},	\
+			{R_PLLCTLC,   rc,   0xFF},	\
+			{R_PLLCTL12, r12,   0xFF},	\
+			{R_PLLCTL1B, r1b_h, 0xF0},	\
+			{R_PLLCTLE,   re,   0xFF},	\
+			{R_PLLCTLF,   rf,   0xFF},	\
+			{R_PLLCTL10, r10,   0xFF},	\
+			{R_PLLCTL11, r11,   0xFF},	\
+		},					\
 	}
 
 static const struct pll_ctl pll_ctls[] = {
@@ -1090,7 +1091,6 @@ static const struct pll_ctl *get_pll_ctl(int input_freq)
 	return pll_ctl;
 }
 
-
 static int set_pll_ctl_from_input_freq(struct snd_soc_codec *codec,
 		const int input_freq)
 {
@@ -1144,7 +1144,7 @@ static int tscs42xx_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static int dac_mute(struct snd_soc_codec *codec)
+static inline int dac_mute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1159,7 +1159,7 @@ static int dac_mute(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static int dac_unmute(struct snd_soc_codec *codec)
+static inline int dac_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1174,7 +1174,7 @@ static int dac_unmute(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static int adc_mute(struct snd_soc_codec *codec)
+static inline int adc_mute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1189,7 +1189,7 @@ static int adc_mute(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static int adc_unmute(struct snd_soc_codec *codec)
+static inline int adc_unmute(struct snd_soc_codec *codec)
 {
 	int ret;
 
@@ -1253,7 +1253,7 @@ static int tscs42xx_set_dai_bclk_ratio(struct snd_soc_dai *codec_dai,
 		unsigned int ratio)
 {
 	struct snd_soc_codec *codec = codec_dai->codec;
-	struct tscs42xx_priv *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
 	unsigned int value;
 	int ret = 0;
 
@@ -1362,7 +1362,7 @@ static struct snd_soc_dai_driver tscs42xx_dai = {
 	.symmetric_rates = 1,
 };
 
-static int part_is_valid(struct tscs42xx_priv *tscs42xx)
+static int part_is_valid(struct tscs42xx *tscs42xx)
 {
 	int val;
 	int ret;
@@ -1382,14 +1382,10 @@ static int part_is_valid(struct tscs42xx_priv *tscs42xx)
 	switch (val) {
 	case 0x4A74:
 	case 0x4A73:
-		ret = true;
-		break;
+		return true;
 	default:
-		ret = false;
-		break;
+		return false;
 	};
-
-	return ret;
 }
 
 static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
@@ -1403,7 +1399,7 @@ static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
 	},
 };
 
-static void init_coeff_ram_defaults(struct tscs42xx_priv *tscs42xx)
+static void init_coeff_ram_defaults(struct tscs42xx *tscs42xx)
 {
 	const u8 norm_addrs[] = { 0x00, 0x05, 0x0a, 0x0f, 0x14, 0x19, 0x1f,
 		0x20, 0x25, 0x2a, 0x2f, 0x34, 0x39, 0x3f, 0x40, 0x45, 0x4a,
@@ -1420,7 +1416,7 @@ static void init_coeff_ram_defaults(struct tscs42xx_priv *tscs42xx)
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
-	struct tscs42xx_priv *tscs42xx;
+	struct tscs42xx *tscs42xx;
 	int ret = 0;
 
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);

@@ -36,13 +36,6 @@
 
 #include "../codecs/tscs42xx.h"
 
-#define DEBUG_TSCS
-#ifdef DEBUG_TSCS
-#define tempo_debug(str, ...) printk(KERN_DEBUG "%s(): " str "\n", __func__, ##__VA_ARGS__)
-#else
-#define tempo_debug(str, ...) 
-#endif
-
 struct tscs_priv {
 	int gpio_hp;
 	int gpio_hp_active_low;
@@ -175,8 +168,6 @@ static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 	int ret;
 	struct tscs_priv *tscs42xx = snd_soc_card_get_drvdata(rtd->card);
 
-	tempo_debug("");
-
 	ret = snd_soc_update_bits(rtd->codec, R_AIC2, RM_AIC2_BLRCM,
 		RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED);
 	if (ret < 0) {
@@ -251,8 +242,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 	struct device_node *codec_of_node;
 	struct snd_soc_pcm_runtime *rtd;
 	char const *mclk_src = NULL;
-
-	tempo_debug("");
 
 	if (NULL == pdev->dev.of_node)
 		return -ENODEV;
@@ -346,8 +335,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 
 		/* Now we should check for digital mic or pick a default config */
 	} else {
-		tempo_debug("hp gpio active low = %d", data->gpio_hp_active_low);
-
 		ret = snd_soc_card_jack_new(&snd_rpi_tscs42xx, "Headphone Jack",
 				SND_JACK_HEADPHONE, &hp_jack,
 				hp_jack_pins, 
@@ -380,8 +367,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 			"Defaulting to Analog Mic. "
 			"See device tree binding for more info.");
 	} else {
-		tempo_debug("mic gpio active low = %d", data->gpio_mic_active_low);
-
 		ret = snd_soc_card_jack_new(&snd_rpi_tscs42xx, "Mic Jack",
 				SND_JACK_HEADPHONE, &mic_jack,
 				mic_jack_pins, 
@@ -409,8 +394,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 
 static int snd_rpi_tscs42xx_remove(struct platform_device *pdev)
 {
-	tempo_debug("");
-
 	return snd_soc_unregister_card(&snd_rpi_tscs42xx);
 }
 
