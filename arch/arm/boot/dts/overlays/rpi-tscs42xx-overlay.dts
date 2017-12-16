@@ -11,10 +11,10 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "okay";
-
-			codec: tscs42A2@69 {
+			wookie: codec@69 {
 				compatible = "tempo,tscs42A2";
 				reg = <0x69>;
+				tscs-blrcm = <0>;
 				status = "okay";
 			};
 		};
@@ -32,7 +32,7 @@
 		__overlay__ {
 			compatible = "tempo,rpi-wookie";
 			i2s-controller = <&i2s>;
-			audio-codec = <&codec>;
+			audio-codec = <&wookie>;
 			mclk-src = "xtal";	
 			mclk-src-freq = <12288000>;
 			audio-routing =
@@ -48,9 +48,9 @@
 				"Analog Mic", "Mic Bias",
 				"Line In 2 L", "Line In",
 				"Line In 2 R", "Line In";
-			status = "okay";
 			hp-gpios = <&gpio 16 1>; //<GPIO_ACTIVE_LOW>;
 		//	mic-gpios = <&gpio 17 0>; //<GPIO_ACTIVE_HIGH>;
+			status = "okay";
 		};
 	};
 };

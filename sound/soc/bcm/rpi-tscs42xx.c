@@ -168,14 +168,6 @@ static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 	int ret;
 	struct tscs_priv *tscs42xx = snd_soc_card_get_drvdata(rtd->card);
 
-	ret = snd_soc_update_bits(rtd->codec, R_AIC2, RM_AIC2_BLRCM,
-		RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED);
-	if (ret < 0) {
-		dev_err(rtd->codec->dev,
-			"Failed to setup audio interface (%d)\n", ret);
-		return ret;
-	}
-
 	ret = snd_soc_dai_set_bclk_ratio(rtd->codec_dai, 64);
 	if (ret < 0) {
 		dev_err(rtd->codec->dev, "Failed to set codec bclk ratio");
@@ -309,9 +301,10 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 
 	ret = snd_soc_register_card(&snd_rpi_tscs42xx);
 	if (ret) {
-		dev_err(&pdev->dev,
-			"snd_soc_register_card() failed: %d\n", ret);
-		return -EPROBE_DEFER;
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev,
+				"Failed to register card (%d)\n", ret);
+		return ret;
 	}
 	rtd = (struct snd_soc_pcm_runtime *) 
 		list_first_entry_or_null(&snd_rpi_tscs42xx.rtd_list,

@@ -22,10 +22,16 @@
 #define COEFF_RAM_COEFF_COUNT (COEFF_RAM_MAX_ADDR + 1)
 #define COEFF_RAM_SIZE (COEFF_SIZE * COEFF_RAM_COEFF_COUNT)
 
+enum {
+	BLRCM_SHARED_BCLK_LRCLK_DAC = 0,
+	BLRCM_CONFIG_COUNT,
+};
+
 struct tscs42xx {
 
 	int bclk_ratio;
 	int samplerate;
+	unsigned int blrcm;
 	struct mutex audio_params_lock;
 
 	u8 coeff_ram[COEFF_RAM_SIZE];
@@ -35,6 +41,9 @@ struct tscs42xx {
 	struct mutex pll_lock;
 
 	struct regmap *regmap;
+
+	struct device *dev;
+	struct snd_soc_dai_driver dai_driver;
 };
 
 struct coeff_ram_ctl {
@@ -851,11 +860,6 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 		R_DACMBCREL3L, 2),
 };
 
-#define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
-
-#define TSCS42XX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE \
-	| SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
-
 static int setup_sample_format(struct snd_soc_codec *codec,
 		snd_pcm_format_t format)
 {
@@ -1344,23 +1348,9 @@ static const struct snd_soc_dai_ops tscs42xx_dai_ops = {
 	.set_sysclk	= tscs42xx_set_dai_sysclk,
 };
 
-static struct snd_soc_dai_driver tscs42xx_dai = {
-	.name = "tscs42xx-HiFi",
-	.playback = {
-		.stream_name = "HiFi Playback",
-		.channels_min = 2,
-		.channels_max = 2,
-		.rates = TSCS42XX_RATES,
-		.formats = TSCS42XX_FORMATS,},
-	.capture = {
-		.stream_name = "HiFi Capture",
-		.channels_min = 2,
-		.channels_max = 2,
-		.rates = TSCS42XX_RATES,
-		.formats = TSCS42XX_FORMATS,},
-	.ops = &tscs42xx_dai_ops,
-	.symmetric_rates = 1,
-};
+static const char * const dai_driver_name = "tscs42xx-HiFi";
+static const char * const playback_stream_name = "HiFi Playback";
+static const char * const capture_stream_name = "HiFi Capture";
 
 static int part_is_valid(struct tscs42xx *tscs42xx)
 {
@@ -1399,7 +1389,7 @@ static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
 	},
 };
 
-static void init_coeff_ram_defaults(struct tscs42xx *tscs42xx)
+static inline void init_coeff_ram_cache(struct tscs42xx *tscs42xx)
 {
 	const u8 norm_addrs[] = { 0x00, 0x05, 0x0a, 0x0f, 0x14, 0x19, 0x1f,
 		0x20, 0x25, 0x2a, 0x2f, 0x34, 0x39, 0x3f, 0x40, 0x45, 0x4a,
@@ -1413,6 +1403,78 @@ static void init_coeff_ram_defaults(struct tscs42xx *tscs42xx)
 		coeff_ram[((norm_addrs[i] + 1) * COEFF_SIZE) - 1] = 0x40;
 }
 
+static inline int set_data_from_of(struct tscs42xx *tscs42xx,
+		struct device_node *np)
+{
+	int ret;
+
+	ret = of_property_read_u32(np, "tscs-blrcm",
+		&tscs42xx->blrcm);
+	if (ret < 0) {
+		dev_err(tscs42xx->dev,
+			"Failed to read tscs-blrcm property (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+#define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
+
+#define TSCS42XX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE \
+	| SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
+
+static const struct snd_soc_dai_driver dai_driver_common = {
+	.name = "tscs42xx-HiFi",
+	.playback = {
+		.stream_name = "HiFi Playback",
+		.channels_min = 2,
+		.channels_max = 2,
+		.rates = TSCS42XX_RATES,
+		.formats = TSCS42XX_FORMATS,},
+	.capture = {
+		.stream_name = "HiFi Capture",
+		.channels_min = 2,
+		.channels_max = 2,
+		.rates = TSCS42XX_RATES,
+		.formats = TSCS42XX_FORMATS,},
+};
+
+static inline int set_blrcm(struct tscs42xx *tscs42xx)
+{
+	int ret;
+
+	memcpy(&tscs42xx->dai_driver, &dai_driver_common,
+			sizeof(struct snd_soc_dai_driver));
+
+	tscs42xx->dai_driver.ops = &tscs42xx_dai_ops;
+
+	switch (tscs42xx->blrcm) {
+	case BLRCM_SHARED_BCLK_LRCLK_DAC:
+
+		ret = regmap_update_bits(tscs42xx->regmap,
+				R_AIC2, RM_AIC2_BLRCM,
+				RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED);
+		if (ret < 0) {
+			dev_err(tscs42xx->dev,
+				"Failed to setup audio interface (%d)\n", ret);
+			return ret;
+		}
+		tscs42xx->dai_driver.symmetric_rates = 1;
+		tscs42xx->dai_driver.symmetric_channels = 1;
+		tscs42xx->dai_driver.symmetric_samplebits = 1;
+
+		break;
+	default:
+		ret = -EINVAL;
+		dev_err(tscs42xx->dev,
+			"Invalid blrcm configuration (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
@@ -1420,41 +1482,58 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	int ret = 0;
 
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);
-	if (!tscs42xx)
-		return -ENOMEM;
-
-	init_coeff_ram_defaults(tscs42xx);
-
-	mutex_init(&tscs42xx->audio_params_lock);
-	mutex_init(&tscs42xx->coeff_ram_lock);
-	mutex_init(&tscs42xx->pll_lock);
+	if (!tscs42xx) {
+		ret = -ENOMEM;
+		dev_err(&i2c->dev,
+			"Failed to allocate memory for data (%d)\n", ret);
+		return ret;
+	}
+	i2c_set_clientdata(i2c, tscs42xx);
+	tscs42xx->dev = &i2c->dev;
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
 		ret = PTR_ERR(tscs42xx->regmap);
-		dev_err(&i2c->dev, "Failed to allocate regmap (%d)\n", ret);
+		dev_err(tscs42xx->dev, "Failed to allocate regmap (%d)\n", ret);
 		return ret;
 	}
 
-	i2c_set_clientdata(i2c, tscs42xx);
+	init_coeff_ram_cache(tscs42xx);
+
+	ret = set_data_from_of(tscs42xx, i2c->dev.of_node);
+	if (ret < 0) {
+		dev_err(tscs42xx->dev,
+			"Failed to set data from device tree (%d)\n", ret);
+		return ret;
+	}
+
+	ret = set_blrcm(tscs42xx);
+	if (ret < 0) {
+		dev_err(tscs42xx->dev, "Failed to setup blrcm (%d)\n", ret);
+		return ret;
+	}
 
 	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
-		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
+		dev_err(tscs42xx->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
 		return ret;
 	}
 
 	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
 	if (ret < 0) {
-		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
+		dev_err(tscs42xx->dev, "Failed to reset device (%d)\n", ret);
 		return ret;
 	}
 
-	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_tscs42xx,
-			&tscs42xx_dai, 1);
+	mutex_init(&tscs42xx->audio_params_lock);
+	mutex_init(&tscs42xx->coeff_ram_lock);
+	mutex_init(&tscs42xx->pll_lock);
+
+	ret = snd_soc_register_codec(tscs42xx->dev, &soc_codec_dev_tscs42xx,
+			&tscs42xx->dai_driver, 1);
 	if (ret) {
-		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
+		dev_err(tscs42xx->dev, "Failed to register codec (%d)\n", ret);
 		return ret;
 	}
 
