@@ -8,7 +8,7 @@ Required Properties:
 	- reg : 	<0x71> for analog mic
 			<0x69> for digital mic
  
-	- tscs-blrcm :	<0> for shared bit and lr clock
+	- tscs-blrcm :	<0> for shared DAC bit and DAC frame clock
 
 Example:
 
