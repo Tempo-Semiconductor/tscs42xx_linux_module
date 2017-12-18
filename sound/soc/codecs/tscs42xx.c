@@ -22,11 +22,6 @@
 #define COEFF_RAM_COEFF_COUNT (COEFF_RAM_MAX_ADDR + 1)
 #define COEFF_RAM_SIZE (COEFF_SIZE * COEFF_RAM_COEFF_COUNT)
 
-enum {
-	BLRCM_SHARED_BCLK_LRCLK_DAC = 0,
-	BLRCM_CONFIG_COUNT,
-};
-
 struct tscs42xx {
 
 	int bclk_ratio;
@@ -43,7 +38,6 @@ struct tscs42xx {
 	struct regmap *regmap;
 
 	struct device *dev;
-	struct snd_soc_dai_driver dai_driver;
 };
 
 struct coeff_ram_ctl {
@@ -319,16 +313,16 @@ exit:
 }
 
 /* D2S Input Select */
-static char const * const d2s_input_select_text[] = {
-	"Line 1", "Line 2"
-};
-
-static const struct soc_enum d2s_input_select_enum =
-SOC_ENUM_SINGLE(R_INMODE, FB_INMODE_DS, ARRAY_SIZE(d2s_input_select_text),
-		d2s_input_select_text);
-
-static const struct snd_kcontrol_new d2s_input_mux =
-SOC_DAPM_ENUM("D2S_IN_MUX", d2s_input_select_enum);
+//static char const * const d2s_input_select_text[] = {
+//	"Line 1", "Line 2"
+//};
+//
+//static const struct soc_enum d2s_input_select_enum =
+//SOC_ENUM_SINGLE(R_INMODE, FB_INMODE_DS, ARRAY_SIZE(d2s_input_select_text),
+//		d2s_input_select_text);
+//
+//static const struct snd_kcontrol_new d2s_input_mux =
+//SOC_DAPM_ENUM("D2S_IN_MUX", d2s_input_select_enum);
 
 /* Input L Capture Route */
 static char const * const input_select_text[] = {
@@ -457,8 +451,8 @@ static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY_S("Digital Mic Enable", 2, R_DMICCTL,
 		FB_DMICCTL_DMICEN, 0, NULL,
 		SND_SOC_DAPM_POST_PMU|SND_SOC_DAPM_PRE_PMD),
-	SND_SOC_DAPM_INPUT("Digital Mic L"),
-	SND_SOC_DAPM_INPUT("Digital Mic R"),
+	//SND_SOC_DAPM_INPUT("Digital Mic L"),
+	//SND_SOC_DAPM_INPUT("Digital Mic R"),
 
 	/* Analog Mic */
 	SND_SOC_DAPM_SUPPLY_S("Mic Bias", 2, R_PWRM1, FB_PWRM1_MICB,
@@ -622,10 +616,10 @@ static int bytes_info_ext(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-#define COEFF_RAM_CTL(xname, xcount, xhandler_get, xhandler_put, xaddr) \
+#define COEFF_RAM_CTL(xname, xcount, xaddr) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
 	.info = bytes_info_ext, \
-	.get = xhandler_get, .put = xhandler_put, \
+	.get = coeff_ram_get, .put = coeff_ram_put, \
 	.private_value = (unsigned long)&(struct coeff_ram_ctl) { \
 		.addr = xaddr, \
 		.bytes_ext = {.max = xcount, }, \
@@ -654,126 +648,76 @@ static const struct snd_kcontrol_new tscs42xx_snd_controls[] = {
 	SOC_ENUM("Input Channel Map Switch", ch_map_select_enum),
 
 	/* Coefficient Ram */
-	COEFF_RAM_CTL("Cascade1L BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x00),
-	COEFF_RAM_CTL("Cascade1L BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x05),
-	COEFF_RAM_CTL("Cascade1L BiQuad3", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x0a),
-	COEFF_RAM_CTL("Cascade1L BiQuad4", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x0f),
-	COEFF_RAM_CTL("Cascade1L BiQuad5", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x14),
-	COEFF_RAM_CTL("Cascade1L BiQuad6", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x19),
+	COEFF_RAM_CTL("Cascade1L BiQuad1", BIQUAD_SIZE, 0x00),
+	COEFF_RAM_CTL("Cascade1L BiQuad2", BIQUAD_SIZE, 0x05),
+	COEFF_RAM_CTL("Cascade1L BiQuad3", BIQUAD_SIZE, 0x0a),
+	COEFF_RAM_CTL("Cascade1L BiQuad4", BIQUAD_SIZE, 0x0f),
+	COEFF_RAM_CTL("Cascade1L BiQuad5", BIQUAD_SIZE, 0x14),
+	COEFF_RAM_CTL("Cascade1L BiQuad6", BIQUAD_SIZE, 0x19),
 
-	COEFF_RAM_CTL("Cascade1R BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x20),
-	COEFF_RAM_CTL("Cascade1R BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x25),
-	COEFF_RAM_CTL("Cascade1R BiQuad3", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x2a),
-	COEFF_RAM_CTL("Cascade1R BiQuad4", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x2f),
-	COEFF_RAM_CTL("Cascade1R BiQuad5", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x34),
-	COEFF_RAM_CTL("Cascade1R BiQuad6", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x39),
+	COEFF_RAM_CTL("Cascade1R BiQuad1", BIQUAD_SIZE, 0x20),
+	COEFF_RAM_CTL("Cascade1R BiQuad2", BIQUAD_SIZE, 0x25),
+	COEFF_RAM_CTL("Cascade1R BiQuad3", BIQUAD_SIZE, 0x2a),
+	COEFF_RAM_CTL("Cascade1R BiQuad4", BIQUAD_SIZE, 0x2f),
+	COEFF_RAM_CTL("Cascade1R BiQuad5", BIQUAD_SIZE, 0x34),
+	COEFF_RAM_CTL("Cascade1R BiQuad6", BIQUAD_SIZE, 0x39),
 
-	COEFF_RAM_CTL("Cascade1L Prescale", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x1f),
-	COEFF_RAM_CTL("Cascade1R Prescale", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x3f),
+	COEFF_RAM_CTL("Cascade1L Prescale", COEFF_SIZE, 0x1f),
+	COEFF_RAM_CTL("Cascade1R Prescale", COEFF_SIZE, 0x3f),
 
-	COEFF_RAM_CTL("Cascade2L BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x40),
-	COEFF_RAM_CTL("Cascade2L BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x45),
-	COEFF_RAM_CTL("Cascade2L BiQuad3", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x4a),
-	COEFF_RAM_CTL("Cascade2L BiQuad4", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x4f),
-	COEFF_RAM_CTL("Cascade2L BiQuad5", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x54),
-	COEFF_RAM_CTL("Cascade2L BiQuad6", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x59),
+	COEFF_RAM_CTL("Cascade2L BiQuad1", BIQUAD_SIZE, 0x40),
+	COEFF_RAM_CTL("Cascade2L BiQuad2", BIQUAD_SIZE, 0x45),
+	COEFF_RAM_CTL("Cascade2L BiQuad3", BIQUAD_SIZE, 0x4a),
+	COEFF_RAM_CTL("Cascade2L BiQuad4", BIQUAD_SIZE, 0x4f),
+	COEFF_RAM_CTL("Cascade2L BiQuad5", BIQUAD_SIZE, 0x54),
+	COEFF_RAM_CTL("Cascade2L BiQuad6", BIQUAD_SIZE, 0x59),
 
-	COEFF_RAM_CTL("Cascade2R BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x60),
-	COEFF_RAM_CTL("Cascade2R BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x65),
-	COEFF_RAM_CTL("Cascade2R BiQuad3", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x6a),
-	COEFF_RAM_CTL("Cascade2R BiQuad4", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x6f),
-	COEFF_RAM_CTL("Cascade2R BiQuad5", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x74),
-	COEFF_RAM_CTL("Cascade2R BiQuad6", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x79),
+	COEFF_RAM_CTL("Cascade2R BiQuad1", BIQUAD_SIZE, 0x60),
+	COEFF_RAM_CTL("Cascade2R BiQuad2", BIQUAD_SIZE, 0x65),
+	COEFF_RAM_CTL("Cascade2R BiQuad3", BIQUAD_SIZE, 0x6a),
+	COEFF_RAM_CTL("Cascade2R BiQuad4", BIQUAD_SIZE, 0x6f),
+	COEFF_RAM_CTL("Cascade2R BiQuad5", BIQUAD_SIZE, 0x74),
+	COEFF_RAM_CTL("Cascade2R BiQuad6", BIQUAD_SIZE, 0x79),
 
-	COEFF_RAM_CTL("Cascade2L Prescale", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x5f),
-	COEFF_RAM_CTL("Cascade2R Prescale", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x7f),
+	COEFF_RAM_CTL("Cascade2L Prescale", COEFF_SIZE, 0x5f),
+	COEFF_RAM_CTL("Cascade2R Prescale", COEFF_SIZE, 0x7f),
 
-	COEFF_RAM_CTL("Bass Extraction BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x80),
-	COEFF_RAM_CTL("Bass Extraction BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x85),
+	COEFF_RAM_CTL("Bass Extraction BiQuad1", BIQUAD_SIZE, 0x80),
+	COEFF_RAM_CTL("Bass Extraction BiQuad2", BIQUAD_SIZE, 0x85),
 
-	COEFF_RAM_CTL("Bass Non Linear Function 1", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x8a),
-	COEFF_RAM_CTL("Bass Non Linear Function 2", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x8b),
+	COEFF_RAM_CTL("Bass Non Linear Function 1", COEFF_SIZE, 0x8a),
+	COEFF_RAM_CTL("Bass Non Linear Function 2", COEFF_SIZE, 0x8b),
 
-	COEFF_RAM_CTL("Bass Limiter BiQuad", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x8c),
+	COEFF_RAM_CTL("Bass Limiter BiQuad", BIQUAD_SIZE, 0x8c),
 
-	COEFF_RAM_CTL("Bass Cut Off BiQuad", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x91),
+	COEFF_RAM_CTL("Bass Cut Off BiQuad", BIQUAD_SIZE, 0x91),
 
-	COEFF_RAM_CTL("Bass Mix", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x96),
+	COEFF_RAM_CTL("Bass Mix", COEFF_SIZE, 0x96),
 
-	COEFF_RAM_CTL("Treb Extraction BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x97),
-	COEFF_RAM_CTL("Treb Extraction BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0x9c),
+	COEFF_RAM_CTL("Treb Extraction BiQuad1", BIQUAD_SIZE, 0x97),
+	COEFF_RAM_CTL("Treb Extraction BiQuad2", BIQUAD_SIZE, 0x9c),
 
-	COEFF_RAM_CTL("Treb Non Linear Function 1", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xa1),
-	COEFF_RAM_CTL("Treb Non Linear Function 2", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xa2),
+	COEFF_RAM_CTL("Treb Non Linear Function 1", COEFF_SIZE, 0xa1),
+	COEFF_RAM_CTL("Treb Non Linear Function 2", COEFF_SIZE, 0xa2),
 
-	COEFF_RAM_CTL("Treb Limiter BiQuad", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xa3),
+	COEFF_RAM_CTL("Treb Limiter BiQuad", BIQUAD_SIZE, 0xa3),
 
-	COEFF_RAM_CTL("Treb Cut Off BiQuad", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xa8),
+	COEFF_RAM_CTL("Treb Cut Off BiQuad", BIQUAD_SIZE, 0xa8),
 
-	COEFF_RAM_CTL("Treb Mix", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xad),
+	COEFF_RAM_CTL("Treb Mix", COEFF_SIZE, 0xad),
 
-	COEFF_RAM_CTL("3D", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xae),
+	COEFF_RAM_CTL("3D", COEFF_SIZE, 0xae),
 
-	COEFF_RAM_CTL("3D Mix", COEFF_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xaf),
+	COEFF_RAM_CTL("3D Mix", COEFF_SIZE, 0xaf),
 
-	COEFF_RAM_CTL("MBC1 BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xb0),
-	COEFF_RAM_CTL("MBC1 BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xb5),
+	COEFF_RAM_CTL("MBC1 BiQuad1", BIQUAD_SIZE, 0xb0),
+	COEFF_RAM_CTL("MBC1 BiQuad2", BIQUAD_SIZE, 0xb5),
 
-	COEFF_RAM_CTL("MBC2 BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xba),
-	COEFF_RAM_CTL("MBC2 BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xbf),
+	COEFF_RAM_CTL("MBC2 BiQuad1", BIQUAD_SIZE, 0xba),
+	COEFF_RAM_CTL("MBC2 BiQuad2", BIQUAD_SIZE, 0xbf),
 
-	COEFF_RAM_CTL("MBC3 BiQuad1", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xc4),
-	COEFF_RAM_CTL("MBC3 BiQuad2", BIQUAD_SIZE,
-		coeff_ram_get, coeff_ram_put, 0xc9),
+	COEFF_RAM_CTL("MBC3 BiQuad1", BIQUAD_SIZE, 0xc4),
+	COEFF_RAM_CTL("MBC3 BiQuad2", BIQUAD_SIZE, 0xc9),
 
 	/* EQ */
 	SOC_SINGLE("EQ1 Switch", R_CONFIG1, FB_CONFIG1_EQ1_EN, 1, 0),
@@ -1348,10 +1292,6 @@ static const struct snd_soc_dai_ops tscs42xx_dai_ops = {
 	.set_sysclk	= tscs42xx_set_dai_sysclk,
 };
 
-static const char * const dai_driver_name = "tscs42xx-HiFi";
-static const char * const playback_stream_name = "HiFi Playback";
-static const char * const capture_stream_name = "HiFi Capture";
-
 static int part_is_valid(struct tscs42xx *tscs42xx)
 {
 	int val;
@@ -1403,28 +1343,12 @@ static inline void init_coeff_ram_cache(struct tscs42xx *tscs42xx)
 		coeff_ram[((norm_addrs[i] + 1) * COEFF_SIZE) - 1] = 0x40;
 }
 
-static inline int set_data_from_of(struct tscs42xx *tscs42xx,
-		struct device_node *np)
-{
-	int ret;
-
-	ret = of_property_read_u32(np, "tscs-blrcm",
-		&tscs42xx->blrcm);
-	if (ret < 0) {
-		dev_err(tscs42xx->dev,
-			"Failed to read tscs-blrcm property (%d)\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 #define TSCS42XX_RATES SNDRV_PCM_RATE_8000_96000
 
 #define TSCS42XX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE \
 	| SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
-static const struct snd_soc_dai_driver dai_driver_common = {
+static struct snd_soc_dai_driver tscs42xx_dai = {
 	.name = "tscs42xx-HiFi",
 	.playback = {
 		.stream_name = "HiFi Playback",
@@ -1438,42 +1362,15 @@ static const struct snd_soc_dai_driver dai_driver_common = {
 		.channels_max = 2,
 		.rates = TSCS42XX_RATES,
 		.formats = TSCS42XX_FORMATS,},
+	.ops = &tscs42xx_dai_ops,
+	.symmetric_rates = 1,
+	.symmetric_channels = 1,
+	.symmetric_samplebits = 1,
 };
 
-static inline int set_blrcm(struct tscs42xx *tscs42xx)
-{
-	int ret;
-
-	memcpy(&tscs42xx->dai_driver, &dai_driver_common,
-			sizeof(struct snd_soc_dai_driver));
-
-	tscs42xx->dai_driver.ops = &tscs42xx_dai_ops;
-
-	switch (tscs42xx->blrcm) {
-	case BLRCM_SHARED_BCLK_LRCLK_DAC:
-
-		ret = regmap_update_bits(tscs42xx->regmap,
-				R_AIC2, RM_AIC2_BLRCM,
-				RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED);
-		if (ret < 0) {
-			dev_err(tscs42xx->dev,
-				"Failed to setup audio interface (%d)\n", ret);
-			return ret;
-		}
-		tscs42xx->dai_driver.symmetric_rates = 1;
-		tscs42xx->dai_driver.symmetric_channels = 1;
-		tscs42xx->dai_driver.symmetric_samplebits = 1;
-
-		break;
-	default:
-		ret = -EINVAL;
-		dev_err(tscs42xx->dev,
-			"Invalid blrcm configuration (%d)\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
+static const struct reg_sequence tscs42xx_patch[] = {
+	{ R_AIC2, RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
+};
 
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
@@ -1500,19 +1397,6 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 
 	init_coeff_ram_cache(tscs42xx);
 
-	ret = set_data_from_of(tscs42xx, i2c->dev.of_node);
-	if (ret < 0) {
-		dev_err(tscs42xx->dev,
-			"Failed to set data from device tree (%d)\n", ret);
-		return ret;
-	}
-
-	ret = set_blrcm(tscs42xx);
-	if (ret < 0) {
-		dev_err(tscs42xx->dev, "Failed to setup blrcm (%d)\n", ret);
-		return ret;
-	}
-
 	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
 		dev_err(tscs42xx->dev, "No valid part (%d)\n", ret);
@@ -1526,12 +1410,19 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		return ret;
 	}
 
+	ret = regmap_register_patch(tscs42xx->regmap, tscs42xx_patch,
+			ARRAY_SIZE(tscs42xx_patch));
+	if (ret < 0) {
+		dev_err(tscs42xx->dev, "Failed to apply patch (%d)\n", ret);
+		return ret;
+	}
+
 	mutex_init(&tscs42xx->audio_params_lock);
 	mutex_init(&tscs42xx->coeff_ram_lock);
 	mutex_init(&tscs42xx->pll_lock);
 
 	ret = snd_soc_register_codec(tscs42xx->dev, &soc_codec_dev_tscs42xx,
-			&tscs42xx->dai_driver, 1);
+			&tscs42xx_dai, 1);
 	if (ret) {
 		dev_err(tscs42xx->dev, "Failed to register codec (%d)\n", ret);
 		return ret;

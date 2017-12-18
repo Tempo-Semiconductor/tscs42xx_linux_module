@@ -14,7 +14,6 @@
 			wookie: codec@69 {
 				compatible = "tempo,tscs42A2";
 				reg = <0x69>;
-				tscs-blrcm = <0>;
 				status = "okay";
 			};
 		};
