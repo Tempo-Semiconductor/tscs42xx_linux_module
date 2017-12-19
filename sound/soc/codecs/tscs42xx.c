@@ -312,18 +312,6 @@ exit:
 	return ret;
 }
 
-/* D2S Input Select */
-//static char const * const d2s_input_select_text[] = {
-//	"Line 1", "Line 2"
-//};
-//
-//static const struct soc_enum d2s_input_select_enum =
-//SOC_ENUM_SINGLE(R_INMODE, FB_INMODE_DS, ARRAY_SIZE(d2s_input_select_text),
-//		d2s_input_select_text);
-//
-//static const struct snd_kcontrol_new d2s_input_mux =
-//SOC_DAPM_ENUM("D2S_IN_MUX", d2s_input_select_enum);
-
 /* Input L Capture Route */
 static char const * const input_select_text[] = {
 	"Line 1", "Line 2", "Line 3", "D2S"
@@ -451,8 +439,6 @@ static const struct snd_soc_dapm_widget tscs42xx_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY_S("Digital Mic Enable", 2, R_DMICCTL,
 		FB_DMICCTL_DMICEN, 0, NULL,
 		SND_SOC_DAPM_POST_PMU|SND_SOC_DAPM_PRE_PMD),
-	//SND_SOC_DAPM_INPUT("Digital Mic L"),
-	//SND_SOC_DAPM_INPUT("Digital Mic R"),
 
 	/* Analog Mic */
 	SND_SOC_DAPM_SUPPLY_S("Mic Bias", 2, R_PWRM1, FB_PWRM1_MICB,
