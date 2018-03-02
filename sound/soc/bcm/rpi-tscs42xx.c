@@ -44,7 +44,6 @@ struct tscs_priv {
 	int gpio_mic_active_low;
 	struct snd_kcontrol *analog_mic_kctl;
 	//struct snd_kcontrol *line_in_kctl;
-	struct snd_soc_codec *codec;
 	int pll_src_id;
 	unsigned int pll_src_freq;
 };
@@ -143,20 +142,8 @@ static int mic_jack_status_check(void *data)
 
 	if (ret == mic_jack_gpio.report) {
 		/* Analog Mic */
-		if (snd_soc_update_bits(priv->codec, R_INSELL, 
-				RM_INSELL, RV_INSELL_IN1) < 0)
-			dev_err(priv->codec->dev, "Failed to select analog mic");
-		if (snd_soc_update_bits(priv->codec, R_INSELR, 
-				RM_INSELR, RV_INSELR_IN1) < 0)
-			dev_err(priv->codec->dev, "Failed to select analog mic");
 	} else {
 		/* Digital Mic */
-		if (snd_soc_update_bits(priv->codec, R_INSELL, 
-				RM_INSELL, RV_INSELL_IN3) < 0)
-			dev_err(priv->codec->dev, "Failed to select digital mic");
-		if (snd_soc_update_bits(priv->codec, R_INSELR, 
-				RM_INSELR, RV_INSELR_IN3) < 0)
-			dev_err(priv->codec->dev, "Failed to select digital mic");
 	}
 
 	return ret;
@@ -170,21 +157,21 @@ static int snd_rpi_tscs42xx_init(struct snd_soc_pcm_runtime *rtd)
 
 	ret = snd_soc_dai_set_bclk_ratio(rtd->codec_dai, 64);
 	if (ret < 0) {
-		dev_err(rtd->codec->dev, "Failed to set codec bclk ratio");
+		dev_err(rtd->dev, "Failed to set codec bclk ratio");
 		return ret;
 	}
 
 	ret = snd_soc_dai_set_bclk_ratio(rtd->cpu_dai, 64);
 	if (ret < 0) {
-		dev_err(rtd->codec->dev, "Failed to set the cpu dai bclk ratio");
+		dev_err(rtd->dev, "Failed to set the cpu dai bclk ratio");
 		return ret;
 	}
 
-	dev_info(rtd->codec->dev, "Setting sysclk\n");
+	dev_info(rtd->dev, "Setting sysclk\n");
 	ret = snd_soc_dai_set_sysclk(rtd->codec_dai, tscs42xx->pll_src_id,
 		tscs42xx->pll_src_freq, 0);
 	if (ret < 0) {
-		dev_err(rtd->codec->dev, "Failed to set sysclk (%d)\n", ret);
+		dev_err(rtd->dev, "Failed to set sysclk (%d)\n", ret);
 		return ret;
 	}
 
@@ -232,7 +219,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 	struct device_node *i2s_node;
 	struct snd_soc_dai_link *dai;
 	struct device_node *codec_of_node;
-	struct snd_soc_pcm_runtime *rtd;
 	char const *mclk_src = NULL;
 
 	if (NULL == pdev->dev.of_node)
@@ -306,15 +292,6 @@ static int snd_rpi_tscs42xx_probe(struct platform_device *pdev)
 				"Failed to register card (%d)\n", ret);
 		return ret;
 	}
-	rtd = (struct snd_soc_pcm_runtime *) 
-		list_first_entry_or_null(&snd_rpi_tscs42xx.rtd_list,
-						struct snd_soc_card,
-						rtd_list);
-	if (NULL == rtd) {
-		dev_err(&pdev->dev, "Failed to get runtime device");
-		return -EPROBE_DEFER;
-	}
-	data->codec = rtd->codec;
 
 	/* Headphone Jack */
 	data->gpio_hp = of_get_named_gpio_flags(pdev->dev.of_node,
