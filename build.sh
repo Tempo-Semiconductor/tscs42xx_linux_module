@@ -64,13 +64,13 @@ echo "Using make arguments: $make_args"
 if [ "$build_all" = true ] || [ "$build_codec" = true ]; then
     echo "Building modules in $root/sound/soc/codecs/"
     cd "$root/sound/soc/codecs/"
-    make $make_args -C $kernel_src_dir M=$PWD modules
+    make $make_args -B -C $kernel_src_dir M=$PWD modules
 fi
 
 if [ "$build_all" = true ] || [ "$build_card" = true ]; then
     echo "Building modules in $root/sound/soc/bcm/"
     cd "$root/sound/soc/bcm/"
-    make $make_args -C $kernel_src_dir M=$PWD modules
+    make $make_args -B -C $kernel_src_dir M=$PWD modules
 fi
 
 if [ "$build_all" = true ] || [ "$build_overlay" = true ]; then
