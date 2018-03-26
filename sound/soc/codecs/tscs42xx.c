@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
+#include <linux/clk.h>
 #include <sound/tlv.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -31,7 +32,6 @@ struct tscs42xx {
 
 	int bclk_ratio;
 	int samplerate;
-	unsigned int blrcm;
 	struct mutex audio_params_lock;
 
 	u8 coeff_ram[COEFF_RAM_SIZE];
@@ -42,7 +42,8 @@ struct tscs42xx {
 
 	struct regmap *regmap;
 
-	struct device *dev;
+	struct clk *sysclk;
+	int sysclk_src_id;
 };
 
 struct coeff_ram_ctl {
@@ -1031,7 +1032,7 @@ static const struct pll_ctl *get_pll_ctl(int input_freq)
 }
 
 static int set_pll_ctl_from_input_freq(struct snd_soc_codec *codec,
-		const int input_freq)
+		unsigned long input_freq)
 {
 	int ret;
 	int i;
@@ -1040,7 +1041,7 @@ static int set_pll_ctl_from_input_freq(struct snd_soc_codec *codec,
 	pll_ctl = get_pll_ctl(input_freq);
 	if (!pll_ctl) {
 		ret = -EINVAL;
-		dev_err(codec->dev, "No PLL input entry for %d (%d)\n",
+		dev_err(codec->dev, "No PLL input entry for %lu (%d)\n",
 			input_freq, ret);
 		return ret;
 	}
@@ -1231,56 +1232,11 @@ static int tscs42xx_set_dai_bclk_ratio(struct snd_soc_dai *codec_dai,
 	return 0;
 }
 
-static int tscs42xx_set_dai_sysclk(struct snd_soc_dai *codec_dai,
-	int clk_id, unsigned int freq, int dir)
-{
-	struct snd_soc_codec *codec = codec_dai->codec;
-	int ret;
-
-	switch (clk_id) {
-	case TSCS42XX_PLL_SRC_XTAL:
-	case TSCS42XX_PLL_SRC_MCLK1:
-		ret = snd_soc_write(codec, R_PLLREFSEL,
-				RV_PLLREFSEL_PLL1_REF_SEL_XTAL_MCLK1 |
-				RV_PLLREFSEL_PLL2_REF_SEL_XTAL_MCLK1);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set pll reference input (%d)\n",
-				ret);
-			return ret;
-		}
-		break;
-	case TSCS42XX_PLL_SRC_MCLK2:
-		ret = snd_soc_write(codec, R_PLLREFSEL,
-				RV_PLLREFSEL_PLL1_REF_SEL_MCLK2 |
-				RV_PLLREFSEL_PLL2_REF_SEL_MCLK2);
-		if (ret < 0) {
-			dev_err(codec->dev,
-				"Failed to set PLL reference (%d)\n", ret);
-			return ret;
-		}
-		break;
-	default:
-		dev_err(codec->dev, "pll src is unsupported\n");
-		return -EINVAL;
-	}
-
-	ret = set_pll_ctl_from_input_freq(codec, freq);
-	if (ret < 0) {
-		dev_err(codec->dev,
-			"Failed to setup PLL input freq (%d)\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 static const struct snd_soc_dai_ops tscs42xx_dai_ops = {
 	.hw_params	= tscs42xx_hw_params,
 	.mute_stream	= tscs42xx_mute_stream,
 	.set_fmt	= tscs42xx_set_dai_fmt,
 	.set_bclk_ratio = tscs42xx_set_dai_bclk_ratio,
-	.set_sysclk	= tscs42xx_set_dai_sysclk,
 };
 
 static int part_is_valid(struct tscs42xx *tscs42xx)
@@ -1309,7 +1265,61 @@ static int part_is_valid(struct tscs42xx *tscs42xx)
 	};
 }
 
+//static char const * const src_names[TSCS42XX_PLL_SRC_CNT] = {
+//	"xtal", "mclk1", "mclk2"};
+
+static int set_sysclk(struct snd_soc_codec *codec)
+{
+	struct tscs42xx *tscs42xx = snd_soc_codec_get_drvdata(codec);
+	unsigned long freq;
+	int ret;
+
+	switch (tscs42xx->sysclk_src_id) {
+	case TSCS42XX_PLL_SRC_XTAL:
+	case TSCS42XX_PLL_SRC_MCLK1:
+		ret = snd_soc_write(codec, R_PLLREFSEL,
+				RV_PLLREFSEL_PLL1_REF_SEL_XTAL_MCLK1 |
+				RV_PLLREFSEL_PLL2_REF_SEL_XTAL_MCLK1);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set pll reference input (%d)\n",
+				ret);
+			return ret;
+		}
+		break;
+	case TSCS42XX_PLL_SRC_MCLK2:
+		ret = snd_soc_write(codec, R_PLLREFSEL,
+				RV_PLLREFSEL_PLL1_REF_SEL_MCLK2 |
+				RV_PLLREFSEL_PLL2_REF_SEL_MCLK2);
+		if (ret < 0) {
+			dev_err(codec->dev,
+				"Failed to set PLL reference (%d)\n", ret);
+			return ret;
+		}
+		break;
+	default:
+		dev_err(codec->dev, "pll src is unsupported\n");
+		return -EINVAL;
+	}
+
+	freq = clk_get_rate(tscs42xx->sysclk);
+	ret = set_pll_ctl_from_input_freq(codec, freq);
+	if (ret < 0) {
+		dev_err(codec->dev,
+			"Failed to setup PLL input freq (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int tscs42xx_probe(struct snd_soc_codec *codec)
+{
+	return set_sysclk(codec);
+}
+
 static struct snd_soc_codec_driver soc_codec_dev_tscs42xx = {
+	.probe = tscs42xx_probe,
 	.component_driver = {
 		.dapm_widgets = tscs42xx_dapm_widgets,
 		.num_dapm_widgets = ARRAY_SIZE(tscs42xx_dapm_widgets),
@@ -1363,11 +1373,15 @@ static const struct reg_sequence tscs42xx_patch[] = {
 	{ R_AIC2, RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
 };
 
+static char const * const src_names[TSCS42XX_PLL_SRC_CNT] = {
+	"xtal", "mclk1", "mclk2"};
+
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
 	struct tscs42xx *tscs42xx;
-	int ret = 0;
+	int src;
+	int ret;
 
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);
 	if (!tscs42xx) {
@@ -1377,12 +1391,23 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		return ret;
 	}
 	i2c_set_clientdata(i2c, tscs42xx);
-	tscs42xx->dev = &i2c->dev;
+
+	for (src = TSCS42XX_PLL_SRC_XTAL; src < TSCS42XX_PLL_SRC_CNT; src++) {
+		tscs42xx->sysclk = devm_clk_get(&i2c->dev, src_names[src]);
+		if (!IS_ERR(tscs42xx->sysclk)) {
+			break;
+		} else if (PTR_ERR(tscs42xx->sysclk) != -ENOENT) {
+			ret = PTR_ERR(tscs42xx->sysclk);
+			dev_err(&i2c->dev, "Failed to get sysclk (%d)\n", ret);
+			return ret;
+		}
+	}
+	tscs42xx->sysclk_src_id = src;
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
 		ret = PTR_ERR(tscs42xx->regmap);
-		dev_err(tscs42xx->dev, "Failed to allocate regmap (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to allocate regmap (%d)\n", ret);
 		return ret;
 	}
 
@@ -1390,21 +1415,21 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 
 	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
-		dev_err(tscs42xx->dev, "No valid part (%d)\n", ret);
+		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
 		return ret;
 	}
 
 	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
 	if (ret < 0) {
-		dev_err(tscs42xx->dev, "Failed to reset device (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
 		return ret;
 	}
 
 	ret = regmap_register_patch(tscs42xx->regmap, tscs42xx_patch,
 			ARRAY_SIZE(tscs42xx_patch));
 	if (ret < 0) {
-		dev_err(tscs42xx->dev, "Failed to apply patch (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to apply patch (%d)\n", ret);
 		return ret;
 	}
 
@@ -1412,10 +1437,10 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	mutex_init(&tscs42xx->coeff_ram_lock);
 	mutex_init(&tscs42xx->pll_lock);
 
-	ret = snd_soc_register_codec(tscs42xx->dev, &soc_codec_dev_tscs42xx,
+	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_tscs42xx,
 			&tscs42xx_dai, 1);
 	if (ret) {
-		dev_err(tscs42xx->dev, "Failed to register codec (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
 		return ret;
 	}
 

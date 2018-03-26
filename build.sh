@@ -4,7 +4,6 @@ root="$PWD"
 kernel_src_dir="/usr/src/linux-headers-$(uname -r)"
 build_all=true
 build_codec=false
-build_card=false
 build_overlay=false
 make_args=''
 dtc_path=''
@@ -16,7 +15,7 @@ usage_str="$(basename "$0") [-h] [-d dir] [-b target] [-a args] [-t dtc] -- Buil
 where:
     -h  show this help text
     -d  set the source directory
-    -b  set the build targets codec, card, and/or overlay
+    -b  set the build targets codec, or overlay
     -a  arguments to pass to make
     -t  specify an alternative dtc"
 
@@ -32,8 +31,6 @@ while getopts $options opt; do
         echo "$OPTARG"
         if [ "$OPTARG" = 'codec' ]; then
             build_codec=true
-        elif [ "$OPTARG" = 'card' ]; then
-            build_card=true
         elif [ "$OPTARG" = 'overlay' ]; then
             build_overlay=true
         else
@@ -64,12 +61,6 @@ echo "Using make arguments: $make_args"
 if [ "$build_all" = true ] || [ "$build_codec" = true ]; then
     echo "Building modules in $root/sound/soc/codecs/"
     cd "$root/sound/soc/codecs/"
-    make $make_args -B -C $kernel_src_dir M=$PWD modules
-fi
-
-if [ "$build_all" = true ] || [ "$build_card" = true ]; then
-    echo "Building modules in $root/sound/soc/bcm/"
-    cd "$root/sound/soc/bcm/"
     make $make_args -B -C $kernel_src_dir M=$PWD modules
 fi
 

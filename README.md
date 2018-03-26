@@ -6,7 +6,6 @@ neccessary to get up and running with the TSCS42xx on the Raspberry Pi.
 Kernel versions tested:
 
 4.9
-4.15
 
 Raspberry Pi Module Build/Install Directions:
 

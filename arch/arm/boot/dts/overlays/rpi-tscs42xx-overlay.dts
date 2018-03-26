@@ -6,37 +6,58 @@
 	compatible = "brcm,bcm2708";
 
 	fragment@0 {
-		target = <&i2c1>;
+		target-path = "/";
 		__overlay__ {
-			#address-cells = <1>;
-			#size-cells = <0>;
-			status = "okay";
-			wookie: codec@69 {
-				compatible = "tempo,tscs42A2";
-				reg = <0x69>;
+			audio_xtal: xtal {
+				#clock-cells = <0>;
+				compatible = "fixed-clock";
+				clock-frequency = <12288000>;
 				status = "okay";
 			};
 		};
 	};
 
 	fragment@1 {
+		target = <&i2c1>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+			wookie: codec@69 {
+				#sound-dai-cells = <0>;
+				compatible = "tempo,tscs42A2";
+				reg = <0x69>;
+				clock-names = "xtal";
+				clocks = <&audio_xtal>;
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@2 {
 		target = <&i2s>;
 		__overlay__ {
 			status = "okay";
 		};
 	};
 
-	fragment@2 {
+	fragment@3 {
 		target = <&sound>;
 		__overlay__ {
-			compatible = "tempo,rpi-wookie";
-			i2s-controller = <&i2s>;
-			audio-codec = <&wookie>;
-			mclk-src = "xtal";	
-			mclk-src-freq = <12288000>;
-			audio-routing =
-				"Headphone Jack", "Headphone L",
-				"Headphone Jack", "Headphone R",
+			compatible = "simple-audio-card";
+			simple-audio-card,name = "Simple Wookie Card";
+			simple-audio-card,format = "i2s";
+			simple-audio-card,bitclock-master = <&dailink0_master>;
+			simple-audio-card,frame-master = <&dailink0_master>;
+			simple-audio-card,widgets =
+				"Speaker", "Speaker",
+				"Headphone", "Headphone",
+				"Microphone", "Analog Mic",
+				"Microphone", "Digital Mic",
+				"Line", "Line In";
+			simple-audio-card,routing =
+				"Headphone", "Headphone L",
+				"Headphone", "Headphone R",
 				"Speaker", "Speaker L",
 				"Speaker", "Speaker R",
 				"Line In 3 L", "Digital Mic",
@@ -47,9 +68,14 @@
 				"Analog Mic", "Mic Bias",
 				"Line In 2 L", "Line In",
 				"Line In 2 R", "Line In";
-			hp-gpios = <&gpio 16 1>; //<GPIO_ACTIVE_LOW>;
-		//	mic-gpios = <&gpio 17 0>; //<GPIO_ACTIVE_HIGH>;
+			simple-audio-card,hp-det-gpio = <&gpio 16 1>;
 			status = "okay";
+			simple-audio-card,cpu {
+				sound-dai = <&i2s>;
+			};
+			dailink0_master: simple-audio-card,codec {
+				sound-dai = <&wookie>;
+			};
 		};
 	};
 };
