@@ -12,6 +12,8 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
+#include <linux/clk.h>
+
 #include <sound/tlv.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -42,7 +44,8 @@ struct tscs42xx {
 
 	struct regmap *regmap;
 
-	struct device *dev;
+	struct clk *sysclk;
+	int sysclk_src_id;
 };
 
 struct coeff_ram_ctl {
@@ -1243,13 +1246,13 @@ static int tscs42xx_set_dai_bclk_ratio(struct snd_soc_dai *codec_dai,
 	return 0;
 }
 
-static int tscs42xx_set_dai_sysclk(struct snd_soc_dai *codec_dai,
-	int clk_id, unsigned int freq, int dir)
+static int set_sysclk(struct snd_soc_component *component)
 {
-	struct snd_soc_component *component = codec_dai->component;
+	struct tscs42xx *tscs42xx = snd_soc_component_get_drvdata(component);
+	unsigned long freq;
 	int ret;
 
-	switch (clk_id) {
+	switch (tscs42xx->sysclk_src_id) {
 	case TSCS42XX_PLL_SRC_XTAL:
 	case TSCS42XX_PLL_SRC_MCLK1:
 		ret = snd_soc_component_write(component, R_PLLREFSEL,
@@ -1277,6 +1280,7 @@ static int tscs42xx_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 		return -EINVAL;
 	}
 
+	freq = clk_get_rate(tscs42xx->sysclk);
 	ret = set_pll_ctl_from_input_freq(component, freq);
 	if (ret < 0) {
 		dev_err(component->dev,
@@ -1287,12 +1291,16 @@ static int tscs42xx_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 	return 0;
 }
 
+static int tscs42xx_probe(struct snd_soc_component *component)
+{
+	return set_sysclk(component);
+}
+
 static const struct snd_soc_dai_ops tscs42xx_dai_ops = {
 	.hw_params	= tscs42xx_hw_params,
 	.mute_stream	= tscs42xx_mute_stream,
 	.set_fmt	= tscs42xx_set_dai_fmt,
 	.set_bclk_ratio = tscs42xx_set_dai_bclk_ratio,
-	.set_sysclk	= tscs42xx_set_dai_sysclk,
 };
 
 static int part_is_valid(struct tscs42xx *tscs42xx)
@@ -1322,6 +1330,7 @@ static int part_is_valid(struct tscs42xx *tscs42xx)
 }
 
 static struct snd_soc_component_driver soc_codec_dev_tscs42xx = {
+	.probe			= tscs42xx_probe,
 	.dapm_widgets		= tscs42xx_dapm_widgets,
 	.num_dapm_widgets	= ARRAY_SIZE(tscs42xx_dapm_widgets),
 	.dapm_routes		= tscs42xx_intercon,
@@ -1375,10 +1384,14 @@ static const struct reg_sequence tscs42xx_patch[] = {
 	{ R_AIC2, RV_AIC2_BLRCM_DAC_BCLK_LRCLK_SHARED },
 };
 
+static char const * const src_names[TSCS42XX_PLL_SRC_CNT] = {
+	"xtal", "mclk1", "mclk2"};
+
 static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
 	struct tscs42xx *tscs42xx;
+	int src;
 	int ret = 0;
 
 	tscs42xx = devm_kzalloc(&i2c->dev, sizeof(*tscs42xx), GFP_KERNEL);
@@ -1389,12 +1402,29 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 		return ret;
 	}
 	i2c_set_clientdata(i2c, tscs42xx);
-	tscs42xx->dev = &i2c->dev;
+
+	for (src = TSCS42XX_PLL_SRC_XTAL; src < TSCS42XX_PLL_SRC_CNT; src++) {
+		tscs42xx->sysclk = devm_clk_get(&i2c->dev, src_names[src]);
+		if (!IS_ERR(tscs42xx->sysclk)) {
+			break;
+		} else if (PTR_ERR(tscs42xx->sysclk) != -ENOENT) {
+			ret = PTR_ERR(tscs42xx->sysclk);
+			dev_err(&i2c->dev, "Failed to get sysclk (%d)\n", ret);
+			return ret;
+		}
+	}
+	if (src == TSCS42XX_PLL_SRC_CNT) {
+		ret = -EINVAL;
+		dev_err(&i2c->dev, "Failed to get a valid clock name (%d)\n",
+				ret);
+		return ret;
+	}
+	tscs42xx->sysclk_src_id = src;
 
 	tscs42xx->regmap = devm_regmap_init_i2c(i2c, &tscs42xx_regmap);
 	if (IS_ERR(tscs42xx->regmap)) {
 		ret = PTR_ERR(tscs42xx->regmap);
-		dev_err(tscs42xx->dev, "Failed to allocate regmap (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to allocate regmap (%d)\n", ret);
 		return ret;
 	}
 
@@ -1402,21 +1432,21 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 
 	ret = part_is_valid(tscs42xx);
 	if (ret <= 0) {
-		dev_err(tscs42xx->dev, "No valid part (%d)\n", ret);
+		dev_err(&i2c->dev, "No valid part (%d)\n", ret);
 		ret = -ENODEV;
 		return ret;
 	}
 
 	ret = regmap_write(tscs42xx->regmap, R_RESET, RV_RESET_ENABLE);
 	if (ret < 0) {
-		dev_err(tscs42xx->dev, "Failed to reset device (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to reset device (%d)\n", ret);
 		return ret;
 	}
 
 	ret = regmap_register_patch(tscs42xx->regmap, tscs42xx_patch,
 			ARRAY_SIZE(tscs42xx_patch));
 	if (ret < 0) {
-		dev_err(tscs42xx->dev, "Failed to apply patch (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to apply patch (%d)\n", ret);
 		return ret;
 	}
 
@@ -1424,10 +1454,10 @@ static int tscs42xx_i2c_probe(struct i2c_client *i2c,
 	mutex_init(&tscs42xx->coeff_ram_lock);
 	mutex_init(&tscs42xx->pll_lock);
 
-	ret = devm_snd_soc_register_component(tscs42xx->dev, &soc_codec_dev_tscs42xx,
+	ret = devm_snd_soc_register_component(&i2c->dev, &soc_codec_dev_tscs42xx,
 			&tscs42xx_dai, 1);
 	if (ret) {
-		dev_err(tscs42xx->dev, "Failed to register codec (%d)\n", ret);
+		dev_err(&i2c->dev, "Failed to register codec (%d)\n", ret);
 		return ret;
 	}
 
