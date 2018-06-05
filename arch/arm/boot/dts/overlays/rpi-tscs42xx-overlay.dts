@@ -50,16 +50,16 @@
 			simple-audio-card,bitclock-master = <&dailink0_master>;
 			simple-audio-card,frame-master = <&dailink0_master>;
 			simple-audio-card,widgets =
-				"Speaker", "Speaker",
-				"Headphone", "Headphone",
+				"Speaker", "Speakers",
+				"Headphone", "Headphones",
 				"Microphone", "Analog Mic",
 				"Microphone", "Digital Mic",
 				"Line", "Line In";
 			simple-audio-card,routing =
-				"Headphone", "Headphone L",
-				"Headphone", "Headphone R",
-				"Speaker", "Speaker L",
-				"Speaker", "Speaker R",
+				"Headphones", "Headphone L",
+				"Headphones", "Headphone R",
+				"Speakers", "Speaker L",
+				"Speakers", "Speaker R",
 				"Line In 3 L", "Digital Mic",
 				"Line In 3 R", "Digital Mic",
 				"Digital Mic", "Digital Mic Enable",
