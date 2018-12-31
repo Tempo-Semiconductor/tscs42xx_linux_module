@@ -11,7 +11,7 @@ neccessary to get up and running with the TSCS42xx on the Raspberry Pi.
 
 1. Install Kernel Headers
 
-    $ sudo apt-get install raspberrypi-kernel-headers
+`$ sudo apt-get install raspberrypi-kernel-headers`
 
 2. Clone the repository
 
