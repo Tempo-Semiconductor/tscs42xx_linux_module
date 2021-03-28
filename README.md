@@ -2,6 +2,8 @@
 
 # TSCS42xx Linux Module
 
+**NOTE: This driver is now upstreamed. There is no need to build the out-of-tree driver if you are using a kernel newer than v4.16**
+
 This repo provides the Linux driver for the TSCS42xx Audio CODEC.
 The development of this driver was carried out on the Raspberry Pi, 
 using TSCS42xx Audio HAT. This repo also contains everything that is
